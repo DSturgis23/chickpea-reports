@@ -1,7 +1,14 @@
 from datetime import date
+import streamlit as st
 
-EVIIVO_CLIENT_ID     = "4a8fc6f8-a0f7-4618-ad28-3c61b00b5d5d"
-EVIIVO_CLIENT_SECRET = "1knWGGXhWQDOv7KTubOJ"
+def _secret(key: str, fallback: str = "") -> str:
+    try:
+        return st.secrets["eviivo"][key]
+    except Exception:
+        return fallback
+
+EVIIVO_CLIENT_ID     = _secret("client_id")
+EVIIVO_CLIENT_SECRET = _secret("client_secret")
 EVIIVO_AUTH_URL      = "https://auth.eviivo.com/api/connect/token"
 EVIIVO_API_URL       = "https://io.eviivo.com/pms/v2"
 
