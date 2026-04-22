@@ -165,6 +165,7 @@ tabs = st.tabs([
     "🚫 Blocked Rooms",
     "🔭 Pace Report",
     "📡 Pick-up Report",
+    "🪟 Booking Window",
 ])
 
 
@@ -1295,3 +1296,225 @@ This can be added — speak to your developer to set up daily snapshot storage.
     c1, c2 = st.columns(2)
     c1.plotly_chart(fig_pu_occ, use_container_width=True)
     c2.plotly_chart(fig_pu_adr, use_container_width=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 8 — Booking Window / Lead Time
+# ─────────────────────────────────────────────────────────────────────────────
+with tabs[7]:
+    st.subheader("Booking Window & Lead Time")
+    with st.expander("ℹ️ How to read this report", expanded=False):
+        st.markdown("""
+**What it shows:** How far in advance guests book — the gap between the booking creation date
+and the check-in date (called the *booking window* or *lead time*).
+
+**Why it matters:**
+- A long average lead time means guests plan ahead — you have more time to manage pricing and fill gaps.
+- A short lead time (lots of last-minute bookings) suggests you may be relying on late demand; yield
+  management and early-bird promotions can help shift the mix.
+- OTAs typically generate shorter lead times than direct bookings.
+- Comparing lead time by property tells you which venues fill early and which need late push.
+
+**Buckets:**
+- **Same day** — booked and arriving on the same day
+- **1–7 days** — last minute
+- **8–30 days** — short notice
+- **31–90 days** — planned ahead
+- **91–180 days** — booking well in advance
+- **181+ days** — very early (often group or special occasion bookings)
+
+Figures are based on check-in date within the selected range.
+        """)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        bw_from = st.date_input("Check-in from", value=date(CY, 1, 1), key="bw_from")
+    with c2:
+        bw_to   = st.date_input("Check-in to",   value=TODAY,          key="bw_to")
+
+    if bw_from > bw_to:
+        st.error("'From' date must be before 'To' date.")
+    else:
+        df_bw = loading_data(bw_from, bw_to)
+
+        if df_bw.empty:
+            st.info("No confirmed bookings in this period.")
+        else:
+            # Compute lead time (days between booking creation and check-in)
+            df_bw = df_bw.copy()
+            df_bw["lead_time"] = (
+                pd.to_datetime(df_bw["checkin"]) - pd.to_datetime(df_bw["created"])
+            ).dt.days
+            # Drop rows where lead time can't be computed or is negative (data anomaly)
+            df_bw = df_bw[df_bw["lead_time"].notna() & (df_bw["lead_time"] >= 0)]
+
+            BUCKET_ORDER = ["Same day", "1–7 days", "8–30 days", "31–90 days", "91–180 days", "181+ days"]
+
+            def lead_bucket(days):
+                if days == 0:   return "Same day"
+                if days <= 7:   return "1–7 days"
+                if days <= 30:  return "8–30 days"
+                if days <= 90:  return "31–90 days"
+                if days <= 180: return "91–180 days"
+                return "181+ days"
+
+            df_bw["bucket"] = df_bw["lead_time"].apply(lead_bucket)
+
+            avg_lt  = df_bw["lead_time"].mean()
+            med_lt  = df_bw["lead_time"].median()
+            pct_lm  = (df_bw["lead_time"] <= 7).mean() * 100
+            pct_far = (df_bw["lead_time"] >= 91).mean() * 100
+
+            # ── Headline metrics ──────────────────────────────────────────────
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Avg Lead Time",       f"{avg_lt:.0f} days")
+            c2.metric("Median Lead Time",    f"{med_lt:.0f} days")
+            c3.metric("Last-minute (≤7 days)", f"{pct_lm:.1f}%")
+            c4.metric("Far ahead (91+ days)",  f"{pct_far:.1f}%")
+
+            st.divider()
+
+            # ── By bucket table ───────────────────────────────────────────────
+            st.markdown("#### By Lead Time Bucket")
+
+            bkt_grp = df_bw.groupby("bucket").agg(
+                Bookings=("booking_ref", "count"),
+                Room_Nights=("nights", "sum"),
+                Revenue=("revenue", "sum"),
+                Avg_Lead=("lead_time", "mean"),
+            ).reindex(BUCKET_ORDER).dropna(how="all").reset_index()
+            bkt_grp["ADR"]   = bkt_grp["Revenue"] / bkt_grp["Room_Nights"].replace(0, np.nan)
+            bkt_grp["Bkg %"] = bkt_grp["Bookings"] / bkt_grp["Bookings"].sum() * 100
+            bkt_grp["Rev %"] = bkt_grp["Revenue"]  / bkt_grp["Revenue"].sum()  * 100
+
+            disp_bkt = bkt_grp.copy()
+            disp_bkt.columns = ["Lead Time", "Bookings", "Room Nights", "Revenue", "Avg Lead (days)", "ADR", "Bkg %", "Rev %"]
+            disp_bkt["Revenue"]          = disp_bkt["Revenue"].apply(fmt_gbp)
+            disp_bkt["ADR"]              = disp_bkt["ADR"].apply(fmt_gbp)
+            disp_bkt["Avg Lead (days)"]  = disp_bkt["Avg Lead (days)"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
+            disp_bkt["Bkg %"]            = disp_bkt["Bkg %"].apply(lambda v: f"{v:.1f}%")
+            disp_bkt["Rev %"]            = disp_bkt["Rev %"].apply(lambda v: f"{v:.1f}%")
+            st.dataframe(disp_bkt, hide_index=True, use_container_width=True)
+
+            # ── Bucket charts ─────────────────────────────────────────────────
+            import plotly.graph_objects as go
+
+            fig_bkt_bkg = go.Figure([
+                go.Bar(x=bkt_grp["bucket"], y=bkt_grp["Bookings"], marker_color=BRAND_GREEN)
+            ])
+            fig_bkt_bkg.update_layout(
+                title="Bookings by Lead Time Bucket",
+                yaxis_title="Bookings",
+                margin=dict(t=50, b=20), height=300, showlegend=False,
+            )
+
+            fig_bkt_rev = go.Figure([
+                go.Bar(x=bkt_grp["bucket"], y=bkt_grp["Revenue"], marker_color=BRAND_LIGHT)
+            ])
+            fig_bkt_rev.update_layout(
+                title="Revenue by Lead Time Bucket",
+                yaxis_title="Revenue (£)", yaxis_tickprefix="£", yaxis_tickformat=",.0f",
+                margin=dict(t=50, b=20), height=300, showlegend=False,
+            )
+
+            c1, c2 = st.columns(2)
+            c1.plotly_chart(fig_bkt_bkg, use_container_width=True)
+            c2.plotly_chart(fig_bkt_rev, use_container_width=True)
+
+            st.divider()
+
+            # ── By property ───────────────────────────────────────────────────
+            st.markdown("#### By Property")
+
+            prop_grp = df_bw.groupby("venue_name").agg(
+                Bookings=("booking_ref", "count"),
+                Avg_Lead=("lead_time", "mean"),
+                Med_Lead=("lead_time", "median"),
+                Pct_LM=("lead_time", lambda x: (x <= 7).mean() * 100),
+            ).reindex(PROP_NAMES).dropna(how="all").reset_index()
+
+            disp_prop = prop_grp.copy()
+            disp_prop.columns = ["Property", "Bookings", "Avg Lead (days)", "Median Lead (days)", "Last-minute %"]
+            disp_prop["Avg Lead (days)"]    = disp_prop["Avg Lead (days)"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
+            disp_prop["Median Lead (days)"] = disp_prop["Median Lead (days)"].apply(lambda v: f"{v:.0f}" if pd.notna(v) else "—")
+            disp_prop["Last-minute %"]      = disp_prop["Last-minute %"].apply(lambda v: f"{v:.1f}%" if pd.notna(v) else "—")
+            st.dataframe(disp_prop, hide_index=True, use_container_width=True)
+
+            prop_grp_clean = prop_grp.dropna(subset=["Avg_Lead"]).sort_values("Avg_Lead", ascending=True)
+            short_names = [p.replace("The ", "") for p in prop_grp_clean["venue_name"]]
+
+            fig_prop_lt = go.Figure([
+                go.Bar(y=short_names, x=prop_grp_clean["Avg_Lead"],
+                       orientation="h", marker_color=BRAND_GREEN,
+                       text=prop_grp_clean["Avg_Lead"].apply(lambda v: f"{v:.0f} days"),
+                       textposition="outside")
+            ])
+            fig_prop_lt.update_layout(
+                title="Average Lead Time by Property",
+                xaxis_title="Days",
+                margin=dict(t=50, b=20, l=130, r=80), height=max(280, len(prop_grp_clean) * 52),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_prop_lt, use_container_width=True)
+
+            st.divider()
+
+            # ── By channel ────────────────────────────────────────────────────
+            st.markdown("#### By Channel")
+
+            ch_grp = df_bw.groupby("channel").agg(
+                Bookings=("booking_ref", "count"),
+                Avg_Lead=("lead_time", "mean"),
+                Med_Lead=("lead_time", "median"),
+                Pct_LM=("lead_time", lambda x: (x <= 7).mean() * 100),
+            ).reset_index().sort_values("Avg_Lead", ascending=False)
+
+            disp_ch = ch_grp.copy()
+            disp_ch.columns = ["Channel", "Bookings", "Avg Lead (days)", "Median Lead (days)", "Last-minute %"]
+            disp_ch["Avg Lead (days)"]    = disp_ch["Avg Lead (days)"].apply(lambda v: f"{v:.0f}")
+            disp_ch["Median Lead (days)"] = disp_ch["Median Lead (days)"].apply(lambda v: f"{v:.0f}")
+            disp_ch["Last-minute %"]      = disp_ch["Last-minute %"].apply(lambda v: f"{v:.1f}%")
+            st.dataframe(disp_ch, hide_index=True, use_container_width=True)
+
+            ch_chart = ch_grp.sort_values("Avg_Lead", ascending=True)
+            fig_ch_lt = go.Figure([
+                go.Bar(y=ch_chart["channel"], x=ch_chart["Avg_Lead"],
+                       orientation="h", marker_color=BRAND_LIGHT,
+                       text=ch_chart["Avg_Lead"].apply(lambda v: f"{v:.0f} days"),
+                       textposition="outside")
+            ])
+            fig_ch_lt.update_layout(
+                title="Average Lead Time by Channel",
+                xaxis_title="Days",
+                margin=dict(t=50, b=20, l=160, r=80), height=max(280, len(ch_chart) * 52),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_ch_lt, use_container_width=True)
+
+            # ── Monthly trend (if range spans multiple months) ────────────────
+            df_bw["checkin_month"] = pd.to_datetime(df_bw["checkin"]).dt.to_period("M")
+            month_count = df_bw["checkin_month"].nunique()
+            if month_count > 1:
+                st.divider()
+                st.markdown("#### Average Lead Time by Check-in Month")
+                mo_grp = (
+                    df_bw.groupby("checkin_month")["lead_time"]
+                    .mean()
+                    .reset_index()
+                    .sort_values("checkin_month")
+                )
+                mo_grp["label"] = mo_grp["checkin_month"].dt.strftime("%b %Y")
+
+                fig_mo = go.Figure([
+                    go.Scatter(x=mo_grp["label"], y=mo_grp["lead_time"],
+                               mode="lines+markers",
+                               line=dict(color=BRAND_GREEN, width=2),
+                               marker=dict(size=8, color=BRAND_GREEN))
+                ])
+                fig_mo.update_layout(
+                    title="Average Lead Time by Check-in Month",
+                    yaxis_title="Avg Lead Time (days)",
+                    margin=dict(t=50, b=20), height=300,
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_mo, use_container_width=True)
