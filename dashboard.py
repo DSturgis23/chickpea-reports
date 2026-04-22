@@ -149,9 +149,17 @@ def avail_nights_in_range(prop: str, dates: list) -> int:
 
 
 def loading_data(from_d: date, to_d: date) -> pd.DataFrame:
-    with st.spinner("Fetching data from Eviivo…"):
-        raw = fetch_bookings(from_d, to_d)
-    return confirmed(to_df(raw))
+    try:
+        with st.spinner("Fetching data from Eviivo…"):
+            raw = fetch_bookings(from_d, to_d)
+        return confirmed(to_df(raw))
+    except Exception as e:
+        st.error(
+            "Could not fetch data from Eviivo. "
+            "If you are the app owner, check that API credentials are set correctly in Streamlit secrets. "
+            f"Error type: {type(e).__name__}"
+        )
+        return pd.DataFrame()
 
 
 # ════════════════════════════════════════════════════════════════════════════════
