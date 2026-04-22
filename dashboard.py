@@ -464,6 +464,55 @@ with tabs[1]:
             st.markdown("#### All Days Combined")
             st.dataframe(kpi_table(sdf, all_dates), hide_index=True, use_container_width=True)
 
+            # ── Charts ────────────────────────────────────────────────────────
+            import plotly.graph_objects as go
+            st.divider()
+            st.markdown("#### Charts")
+
+            rev_by_prop, occ_by_prop, revpar_by_prop = [], [], []
+            for prop in PROP_NAMES:
+                pdf   = sdf[sdf["venue_name"] == prop]
+                avail = avail_nights_in_range(prop, all_dates)
+                rns   = pdf["num_rooms"].sum()
+                rev   = pdf["nightly_revenue"].sum()
+                rev_by_prop.append(float(rev))
+                occ_by_prop.append(rns / avail * 100 if avail else 0)
+                revpar_by_prop.append(rev / avail if avail else 0)
+
+            short_props = [p.replace("The ", "") for p in PROP_NAMES]
+
+            fig_wk_rev = go.Figure([
+                go.Bar(x=short_props, y=rev_by_prop, marker_color=BRAND_GREEN)
+            ])
+            fig_wk_rev.update_layout(
+                title="Revenue by Property",
+                yaxis_title="Revenue (£)", yaxis_tickprefix="£", yaxis_tickformat=",.0f",
+                margin=dict(t=50, b=20), height=320, showlegend=False,
+            )
+
+            fig_wk_occ = go.Figure([
+                go.Bar(x=short_props, y=occ_by_prop, marker_color=BRAND_LIGHT)
+            ])
+            fig_wk_occ.update_layout(
+                title="Occupancy % by Property",
+                yaxis_title="Occupancy %", yaxis_ticksuffix="%",
+                margin=dict(t=50, b=20), height=320, showlegend=False,
+            )
+
+            fig_wk_rp = go.Figure([
+                go.Bar(x=short_props, y=revpar_by_prop, marker_color=BRAND_GREEN)
+            ])
+            fig_wk_rp.update_layout(
+                title="RevPAR by Property",
+                yaxis_title="RevPAR (£)", yaxis_tickprefix="£", yaxis_tickformat=",.0f",
+                margin=dict(t=50, b=20), height=320, showlegend=False,
+            )
+
+            c1, c2 = st.columns(2)
+            c1.plotly_chart(fig_wk_rev, use_container_width=True)
+            c2.plotly_chart(fig_wk_occ, use_container_width=True)
+            st.plotly_chart(fig_wk_rp, use_container_width=True)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 3 — Source Report
@@ -543,6 +592,42 @@ check that Eviivo is set up to capture channel information for each booking type
         display["Bkg %"]   = display["Bkg %"].apply(lambda v: f"{v:.1f}%")
 
         st.dataframe(display, hide_index=True, use_container_width=True)
+
+        # ── Charts ────────────────────────────────────────────────────────────
+        import plotly.graph_objects as go
+        st.divider()
+        st.markdown("#### Charts")
+
+        chart_src = ch_all[ch_all["channel"] != "TOTAL"].copy().sort_values("Revenue", ascending=True)
+
+        fig_src_rev = go.Figure([
+            go.Bar(y=chart_src["channel"], x=chart_src["Revenue"],
+                   orientation="h", marker_color=BRAND_GREEN)
+        ])
+        fig_src_rev.update_layout(
+            title="Revenue by Channel",
+            xaxis_title="Revenue (£)", xaxis_tickprefix="£", xaxis_tickformat=",.0f",
+            margin=dict(t=50, b=20, l=160), height=max(300, len(chart_src) * 52),
+            showlegend=False,
+        )
+
+        green_palette = ["#1b4332","#2d6a4f","#40916c","#52b788","#74c69d","#95d5b2","#b7e4c7","#d8f3dc"]
+        fig_src_pie = go.Figure([
+            go.Pie(
+                labels=chart_src["channel"], values=chart_src["Revenue"],
+                hole=0.45,
+                marker=dict(colors=green_palette[:len(chart_src)]),
+                textinfo="label+percent",
+            )
+        ])
+        fig_src_pie.update_layout(
+            title="Revenue Share by Channel",
+            margin=dict(t=50, b=20), height=380, showlegend=False,
+        )
+
+        c1, c2 = st.columns(2)
+        c1.plotly_chart(fig_src_rev, use_container_width=True)
+        c2.plotly_chart(fig_src_pie, use_container_width=True)
 
         with st.expander("Breakdown by property"):
             for prop in PROP_NAMES:
@@ -630,6 +715,42 @@ are exposed in the API.
 
             st.markdown("#### All Properties")
             st.dataframe(disp_rp, hide_index=True, use_container_width=True)
+
+            # ── Charts ────────────────────────────────────────────────────────
+            import plotly.graph_objects as go
+            st.divider()
+            st.markdown("#### Charts")
+
+            rp_chart = rp_grp[rp_grp["rate_plan"] != "TOTAL"].copy().sort_values("Revenue", ascending=True)
+
+            fig_rp_rev = go.Figure([
+                go.Bar(y=rp_chart["rate_plan"], x=rp_chart["Revenue"],
+                       orientation="h", marker_color=BRAND_GREEN)
+            ])
+            fig_rp_rev.update_layout(
+                title="Revenue by Rate Plan",
+                xaxis_title="Revenue (£)", xaxis_tickprefix="£", xaxis_tickformat=",.0f",
+                margin=dict(t=50, b=20, l=130), height=max(280, len(rp_chart) * 60),
+                showlegend=False,
+            )
+
+            green_palette = ["#1b4332","#2d6a4f","#40916c","#52b788","#74c69d","#95d5b2","#b7e4c7","#d8f3dc"]
+            fig_rp_pie = go.Figure([
+                go.Pie(
+                    labels=rp_chart["rate_plan"], values=rp_chart["Revenue"],
+                    hole=0.45,
+                    marker=dict(colors=green_palette[:len(rp_chart)]),
+                    textinfo="label+percent",
+                )
+            ])
+            fig_rp_pie.update_layout(
+                title="Revenue Share by Rate Plan",
+                margin=dict(t=50, b=20), height=320, showlegend=False,
+            )
+
+            c1, c2 = st.columns(2)
+            c1.plotly_chart(fig_rp_rev, use_container_width=True)
+            c2.plotly_chart(fig_rp_pie, use_container_width=True)
 
             with st.expander("Breakdown by property"):
                 for prop in PROP_NAMES:
@@ -788,6 +909,39 @@ re-upload when you want fresher data.
         )
         by_prop.columns = ["Property", "Blocks", "Room-Nights"]
         st.dataframe(by_prop, hide_index=True, use_container_width=True)
+
+        # ── Charts ────────────────────────────────────────────────────────────
+        import plotly.graph_objects as go
+        st.divider()
+        st.markdown("#### Charts")
+
+        by_type_chart = by_type.sort_values("Room-Nights", ascending=True)
+        fig_blk_type = go.Figure([
+            go.Bar(y=by_type_chart["Type"], x=by_type_chart["Room-Nights"],
+                   orientation="h", marker_color=BRAND_GREEN)
+        ])
+        fig_blk_type.update_layout(
+            title="Room-Nights Blocked by Type",
+            xaxis_title="Room-Nights",
+            margin=dict(t=50, b=20, l=160), height=max(280, len(by_type_chart) * 60),
+            showlegend=False,
+        )
+
+        by_prop_chart = by_prop.sort_values("Room-Nights", ascending=True)
+        fig_blk_prop = go.Figure([
+            go.Bar(y=by_prop_chart["Property"], x=by_prop_chart["Room-Nights"],
+                   orientation="h", marker_color=BRAND_LIGHT)
+        ])
+        fig_blk_prop.update_layout(
+            title="Room-Nights Blocked by Property",
+            xaxis_title="Room-Nights",
+            margin=dict(t=50, b=20, l=160), height=max(280, len(by_prop_chart) * 52),
+            showlegend=False,
+        )
+
+        c1, c2 = st.columns(2)
+        c1.plotly_chart(fig_blk_type, use_container_width=True)
+        c2.plotly_chart(fig_blk_prop, use_container_width=True)
 
         # ── Full detail ───────────────────────────────────────────────────────
         with st.expander("Full block detail"):
@@ -1083,3 +1237,61 @@ This can be added — speak to your developer to set up daily snapshot storage.
                     pickup_table(cy_p, ly_p, [prop]),
                     hide_index=True, use_container_width=True,
                 )
+
+    # ── Charts ────────────────────────────────────────────────────────────────
+    import plotly.graph_objects as go
+    st.divider()
+    st.markdown("#### Charts — Group Occupancy & ADR by Date")
+
+    pu_dates, pu_occ_cy, pu_occ_ly, pu_adr_cy, pu_adr_ly = [], [], [], [], []
+    d = pu_start
+    while d <= pu_end:
+        ly_d = d - relativedelta(years=1)
+        cy_rns = ly_rns = cy_rev = ly_rev = avail_total = 0
+        for prop in PROP_NAMES:
+            cy_p = df_cy_pu[(df_cy_pu["venue_name"] == prop) & (df_cy_pu["checkin"] == d)] if not df_cy_pu.empty else pd.DataFrame()
+            ly_p = df_ly_pu[(df_ly_pu["venue_name"] == prop) & (df_ly_pu["checkin"] == ly_d)] if not df_ly_pu.empty else pd.DataFrame()
+            cy_rns += int(cy_p["num_rooms"].sum()) if not cy_p.empty else 0
+            ly_rns += int(ly_p["num_rooms"].sum()) if not ly_p.empty else 0
+            cy_rev += cy_p["revenue"].sum() if not cy_p.empty else 0
+            ly_rev += ly_p["revenue"].sum() if not ly_p.empty else 0
+            avail_total += get_room_count(prop, d)
+        pu_dates.append(d.strftime("%d %b"))
+        pu_occ_cy.append(cy_rns / avail_total * 100 if avail_total else 0)
+        pu_occ_ly.append(ly_rns / avail_total * 100 if avail_total else 0)
+        pu_adr_cy.append(cy_rev / cy_rns if cy_rns else None)
+        pu_adr_ly.append(ly_rev / ly_rns if ly_rns else None)
+        d += timedelta(days=1)
+
+    fig_pu_occ = go.Figure([
+        go.Scatter(x=pu_dates, y=pu_occ_ly, name="LY Occ%", mode="lines",
+                   line=dict(color=BRAND_LIGHT, width=2, dash="dot")),
+        go.Scatter(x=pu_dates, y=pu_occ_cy, name="OTB Occ%", mode="lines",
+                   line=dict(color=BRAND_GREEN, width=2), fill="tozeroy",
+                   fillcolor=f"rgba(45,106,79,0.12)"),
+    ])
+    fig_pu_occ.update_layout(
+        title="Occupancy % — OTB vs Last Year",
+        yaxis_title="Occupancy %", yaxis_ticksuffix="%",
+        xaxis_tickangle=-45,
+        legend=dict(orientation="h", y=1.1),
+        margin=dict(t=60, b=60), height=340,
+    )
+
+    fig_pu_adr = go.Figure([
+        go.Scatter(x=pu_dates, y=pu_adr_ly, name="LY ADR", mode="lines",
+                   line=dict(color=BRAND_LIGHT, width=2, dash="dot")),
+        go.Scatter(x=pu_dates, y=pu_adr_cy, name="OTB ADR", mode="lines",
+                   line=dict(color=BRAND_GREEN, width=2)),
+    ])
+    fig_pu_adr.update_layout(
+        title="ADR — OTB vs Last Year",
+        yaxis_title="ADR (£)", yaxis_tickprefix="£", yaxis_tickformat=",.0f",
+        xaxis_tickangle=-45,
+        legend=dict(orientation="h", y=1.1),
+        margin=dict(t=60, b=60), height=340,
+    )
+
+    c1, c2 = st.columns(2)
+    c1.plotly_chart(fig_pu_occ, use_container_width=True)
+    c2.plotly_chart(fig_pu_adr, use_container_width=True)
