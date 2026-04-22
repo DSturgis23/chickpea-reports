@@ -175,65 +175,79 @@ with tabs[0]:
     st.subheader("Monthly Accommodation Revenue by Property")
     with st.expander("ℹ️ How to read this report", expanded=False):
         st.markdown("""
-**What it shows:** Total gross accommodation revenue (including VAT) per property, broken down by month.
-Revenue is attributed to the month in which guests **check in**.
+**What it shows:** Total gross accommodation revenue (inc. VAT) per property per month,
+with a year-on-year comparison.
 
-**Revenue table:** Shows actual revenue for completed months. For the current year, future months
-(marked with `*`) show the value of confirmed bookings already on the books — useful for forecasting,
-but not yet earned revenue. The **YTD Total** column only counts completed months.
+**Revenue table:** Actual revenue for completed months. Future months (marked `*`) show
+confirmed bookings already on the books — useful for forecasting but not yet earned.
+The **YTD Total** column covers completed months only.
 
-**Year-on-year variance table:** Compares the same months across two years. Only completed months
-are included so the comparison is like-for-like. Months where a property was not yet trading or
-was closed for refurbishment are flagged and excluded from the Total column to avoid distorting the picture.
+**Year-on-year table:** How much more or less each property made vs the same month last year.
+Months affected by closures or a property not yet being open are flagged and left out of the
+total so the comparison stays fair.
 
-**Group Total metrics** at the bottom show the combined position across all seven properties.
+**Charts:** Monthly group revenue trend (both years side by side) and a per-property YTD bar
+to show which venues are driving growth.
         """)
-
 
     col1, col2 = st.columns([1, 3])
     with col1:
         yr_a = st.selectbox("Year", [CY, LY, CY - 2], index=0, key="mr_yr_a")
         yr_b = st.selectbox("Compare with", [LY, CY - 2, CY - 3], index=0, key="mr_yr_b")
 
-    # Fetch full year for both years
     df_a = loading_data(date(yr_a, 1, 1), date(yr_a, 12, 31))
     df_b = loading_data(date(yr_b, 1, 1), date(yr_b, 12, 31))
 
     MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
-    # Last completed month: if we're partway through a month, that month is partial
     last_complete_month = TODAY.month - 1 if TODAY.day < 28 else TODAY.month
     if last_complete_month == 0:
         last_complete_month = 12
 
-    def monthly_pivot(df: pd.DataFrame, year: int) -> pd.DataFrame:
+    def monthly_pivot(df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
             return pd.DataFrame(0.0, index=PROP_NAMES, columns=range(1, 13))
         df = df.copy()
         df["month"] = pd.to_datetime(df["checkin"], errors="coerce").dt.month
-        piv = (
+        return (
             df.groupby(["venue_name", "month"])["revenue"]
             .sum()
             .unstack(fill_value=0.0)
             .reindex(index=PROP_NAMES, columns=range(1, 13), fill_value=0.0)
         )
-        return piv
 
-    piv_a = monthly_pivot(df_a, yr_a)
-    piv_b = monthly_pivot(df_b, yr_b)
+    piv_a = monthly_pivot(df_a)
+    piv_b = monthly_pivot(df_b)
 
     def _val(piv, prop, m):
         if prop in piv.index and m in piv.columns:
             return float(piv.loc[prop, m])
         return 0.0
 
-    # ── Revenue table for primary year ────────────────────────────────────────
-    st.markdown(f"#### {yr_a} Revenue by Property (£)")
+    compare_months = list(range(1, last_complete_month + 1)) if yr_a == CY else list(range(1, 13))
+    compare_label  = f"Jan–{MONTHS[last_complete_month - 1]}" if yr_a == CY else "Full year"
+
+    # ── Group headline metrics (top of page) ──────────────────────────────────
+    total_a = sum(_val(piv_a, p, m) for p in PROP_NAMES for m in compare_months)
+    total_b = sum(_val(piv_b, p, m) for p in PROP_NAMES for m in compare_months)
+    diff_g  = total_a - total_b
+    pct_g   = (diff_g / total_b * 100) if total_b else 0.0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(f"Group Revenue {yr_a} ({compare_label})", fmt_gbp(total_a))
+    c2.metric(f"Group Revenue {yr_b} ({compare_label})", fmt_gbp(total_b))
+    c3.metric("Variance (£)", fmt_var(diff_g))
+    c4.metric("Variance (%)", fmt_pct(pct_g))
+
+    st.divider()
+
+    # ── Revenue table ─────────────────────────────────────────────────────────
+    st.markdown(f"#### {yr_a} Revenue by Property")
     if yr_a == CY:
         st.caption(
-            f"Months Jan–{MONTHS[last_complete_month - 1]} = actual revenue (check-in has passed). "
-            f"Months {MONTHS[last_complete_month]}–Dec = forward bookings already on the books."
+            f"Jan–{MONTHS[last_complete_month - 1]} = actual earned revenue. "
+            f"{MONTHS[last_complete_month]}–Dec* = forward bookings on the books (not yet earned)."
         )
 
     rev_rows = []
@@ -241,100 +255,120 @@ was closed for refurbishment are flagged and excluded from the Total column to a
         row = {"Property": prop}
         for m in range(1, 13):
             v = _val(piv_a, prop, m)
-            label = fmt_gbp(v) if v else "—"
-            # Mark future months for current year
             if yr_a == CY and m > last_complete_month:
-                label = f"{fmt_gbp(v)} *" if v else "—"
-            row[MONTHS[m - 1]] = label
-        total_hist = sum(_val(piv_a, prop, m) for m in range(1, last_complete_month + 1)) if yr_a == CY else sum(_val(piv_a, prop, m) for m in range(1, 13))
-        row["YTD Total"] = fmt_gbp(total_hist)
+                row[MONTHS[m - 1]] = f"{fmt_gbp(v)} *" if v else "—"
+            else:
+                row[MONTHS[m - 1]] = fmt_gbp(v) if v else "—"
+        ytd = sum(_val(piv_a, prop, m) for m in compare_months)
+        row["YTD Total"] = fmt_gbp(ytd)
         rev_rows.append(row)
 
     st.dataframe(pd.DataFrame(rev_rows), hide_index=True, use_container_width=True)
     if yr_a == CY:
-        st.caption("* = forward bookings (future check-in dates). YTD Total = completed months only.")
+        st.caption("* = forward bookings. YTD Total = completed months only.")
 
-    # ── YoY variance — completed months only for a fair comparison ────────────
-    # For CY vs LY: only compare months that are complete in BOTH years
-    compare_months = list(range(1, last_complete_month + 1)) if yr_a == CY else list(range(1, 13))
-    compare_label  = f"Jan–{MONTHS[last_complete_month - 1]}" if yr_a == CY else "Full year"
-
-    st.markdown(f"#### Year-on-Year Variance vs {yr_b} — {compare_label} ({yr_a} vs {yr_b})")
-    if yr_a == CY:
-        st.caption("Comparing completed months only for a like-for-like view. Forward bookings excluded.")
+    # ── YoY variance table ────────────────────────────────────────────────────
+    st.markdown(f"#### Year-on-Year vs {yr_b}  —  {compare_label}")
+    st.caption(
+        f"How much more (+) or less (−) each property made vs the same month in {yr_b}. "
+        f"Months affected by closures or a property not yet open are flagged and excluded from the total."
+    )
 
     var_rows = []
     for prop in PROP_NAMES:
         vrow = {"Property": prop}
         skip_months = set()
         for m in compare_months:
-            label = None
-            # Suppress if LY month is pre-opening for this property
+            flag = None
             if is_pre_opening(prop, yr_b, m):
-                label = "pre-opening"
+                flag = "not open"
                 skip_months.add(m)
             elif is_partial_opening(prop, yr_b, m):
-                label = "partial month (opening)"
+                flag = "partial open"
                 skip_months.add(m)
-            # Flag known closures in either year
             cn_a = closure_note(prop, yr_a, m)
             cn_b = closure_note(prop, yr_b, m)
-            if cn_a:
-                label = f"⚠ {cn_a} ({yr_a})"
-                skip_months.add(m)
-            elif cn_b:
-                label = f"⚠ {cn_b} ({yr_b})"
+            if cn_a or cn_b:
+                flag = "⚠ closed"
                 skip_months.add(m)
 
-            # Flag partial closures (include in total but note them)
             pc_a = partial_closure_note(prop, yr_a, m)
             pc_b = partial_closure_note(prop, yr_b, m)
 
-            if label:
-                vrow[MONTHS[m - 1]] = label
+            if flag:
+                vrow[MONTHS[m - 1]] = flag
             else:
-                va = _val(piv_a, prop, m)
-                vb = _val(piv_b, prop, m)
+                va   = _val(piv_a, prop, m)
+                vb   = _val(piv_b, prop, m)
                 diff = va - vb
                 pct  = (diff / vb * 100) if vb else (100.0 if va else 0.0)
-                cell = f"{fmt_var(diff)} ({fmt_pct(pct)})"
-                if pc_a:
-                    cell += f" ⚠†"
-                elif pc_b:
-                    cell += f" ⚠†"
+                sign = "+" if diff >= 0 else ""
+                cell = f"{sign}£{abs(diff):,.0f}  ({fmt_pct(pct)})"
+                if pc_a or pc_b:
+                    cell += " †"
                 vrow[MONTHS[m - 1]] = cell
 
-        # Total excludes flagged months for a clean like-for-like
-        valid_months = [m for m in compare_months if m not in skip_months]
-        va_t = sum(_val(piv_a, prop, m) for m in valid_months)
-        vb_t = sum(_val(piv_b, prop, m) for m in valid_months)
-        diff_t = va_t - vb_t
-        pct_t  = (diff_t / vb_t * 100) if vb_t else 0.0
-        note   = f" ({len(skip_months)} mo. excl.)" if skip_months else ""
-        vrow["Total"] = f"{fmt_var(diff_t)} ({fmt_pct(pct_t)}){note}"
+        valid = [m for m in compare_months if m not in skip_months]
+        va_t  = sum(_val(piv_a, prop, m) for m in valid)
+        vb_t  = sum(_val(piv_b, prop, m) for m in valid)
+        dt    = va_t - vb_t
+        pt    = (dt / vb_t * 100) if vb_t else 0.0
+        excl  = f"  ({len(skip_months)} mo. excluded)" if skip_months else ""
+        sign  = "+" if dt >= 0 else ""
+        vrow["Total"] = f"{sign}£{abs(dt):,.0f}  ({fmt_pct(pt)}){excl}"
         var_rows.append(vrow)
 
     yoy_cols = ["Property"] + [MONTHS[m - 1] for m in compare_months] + ["Total"]
     st.dataframe(pd.DataFrame(var_rows)[yoy_cols], hide_index=True, use_container_width=True)
     st.caption(
-        "**Key:** `pre-opening` = property not yet trading · "
-        "`partial month (opening)` = property opened mid-month (LY figures understated) · "
-        "`⚠ Closed for refurbishment` = full-month closure, excluded from Total · "
-        "`⚠†` = partial closure (property open for part of the month only — figures included but may not be comparable)"
+        "**not open** = property wasn't trading yet  ·  "
+        "**⚠ closed** = full closure, excluded from total  ·  "
+        "**†** = partial closure (figures included but may not be directly comparable)"
     )
 
-    # ── Group summary metrics ─────────────────────────────────────────────────
-    st.markdown("#### Group Total")
-    total_a_ytd = sum(_val(piv_a, p, m) for p in PROP_NAMES for m in compare_months)
-    total_b_ytd = sum(_val(piv_b, p, m) for p in PROP_NAMES for m in compare_months)
-    diff_g  = total_a_ytd - total_b_ytd
-    pct_g   = (diff_g / total_b_ytd * 100) if total_b_ytd else 0.0
+    # ── Charts ────────────────────────────────────────────────────────────────
+    import plotly.graph_objects as go
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric(f"{yr_a} ({compare_label})", fmt_gbp(total_a_ytd))
-    c2.metric(f"{yr_b} ({compare_label})", fmt_gbp(total_b_ytd))
-    c3.metric("Variance £", fmt_var(diff_g))
-    c4.metric("Variance %", fmt_pct(pct_g))
+    st.divider()
+    st.markdown("#### Charts")
+
+    # Chart 1: Monthly group revenue — CY vs LY
+    grp_a = [sum(_val(piv_a, p, m) for p in PROP_NAMES) for m in range(1, 13)]
+    grp_b = [sum(_val(piv_b, p, m) for p in PROP_NAMES) for m in range(1, 13)]
+
+    fig_monthly = go.Figure([
+        go.Bar(name=str(yr_b), x=MONTHS, y=grp_b, marker_color=BRAND_LIGHT),
+        go.Bar(name=str(yr_a), x=MONTHS, y=grp_a, marker_color=BRAND_GREEN),
+    ])
+    fig_monthly.update_layout(
+        barmode="group",
+        title=f"Monthly Group Revenue — {yr_a} vs {yr_b}",
+        yaxis_title="Revenue (£)", yaxis_tickprefix="£", yaxis_tickformat=",.0f",
+        legend=dict(orientation="h", y=1.1),
+        margin=dict(t=60, b=20), height=350,
+    )
+    st.plotly_chart(fig_monthly, use_container_width=True)
+
+    # Chart 2: YTD revenue by property — CY vs LY (horizontal bars)
+    ytd_a = [sum(_val(piv_a, p, m) for m in compare_months) for p in PROP_NAMES]
+    ytd_b = [sum(_val(piv_b, p, m) for m in compare_months) for p in PROP_NAMES]
+    # Shorten property names for chart
+    short_names = [p.replace("The ", "") for p in PROP_NAMES]
+
+    fig_ytd = go.Figure([
+        go.Bar(name=f"{yr_b} ({compare_label})", y=short_names, x=ytd_b,
+               orientation="h", marker_color=BRAND_LIGHT),
+        go.Bar(name=f"{yr_a} ({compare_label})", y=short_names, x=ytd_a,
+               orientation="h", marker_color=BRAND_GREEN),
+    ])
+    fig_ytd.update_layout(
+        barmode="group",
+        title=f"YTD Revenue by Property ({compare_label}) — {yr_a} vs {yr_b}",
+        xaxis_title="Revenue (£)", xaxis_tickprefix="£", xaxis_tickformat=",.0f",
+        legend=dict(orientation="h", y=1.1),
+        margin=dict(t=60, b=20), height=380,
+    )
+    st.plotly_chart(fig_ytd, use_container_width=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -878,10 +912,52 @@ Bookings can still come in or cancel before the month arrives.
 
     # ── Group total ───────────────────────────────────────────────────────────
     st.markdown("#### Group Total")
-    st.dataframe(
-        _pace_month_rows(df_cy_pace, df_ly_pace, PROP_NAMES),
-        hide_index=True, use_container_width=True,
+    group_df = _pace_month_rows(df_cy_pace, df_ly_pace, PROP_NAMES)
+    st.dataframe(group_df, hide_index=True, use_container_width=True)
+
+    # ── Bar charts ────────────────────────────────────────────────────────────
+    import plotly.graph_objects as go
+
+    # Build raw numeric values for charting (re-derive from data)
+    chart_months, cy_rns_list, ly_rns_list, cy_rev_list, ly_rev_list = [], [], [], [], []
+    for m_start, m_end in month_list:
+        ly_m_start = m_start - relativedelta(years=1)
+        ly_m_end   = m_end   - relativedelta(years=1)
+        cy_m = df_cy_pace[(df_cy_pace["checkin"] >= m_start) & (df_cy_pace["checkin"] <= m_end)] if not df_cy_pace.empty else pd.DataFrame()
+        ly_m = df_ly_pace[(df_ly_pace["checkin"] >= ly_m_start) & (df_ly_pace["checkin"] <= ly_m_end)] if not df_ly_pace.empty else pd.DataFrame()
+        chart_months.append(m_start.strftime("%b %Y"))
+        cy_rns_list.append(int(cy_m["nights"].sum()) if not cy_m.empty else 0)
+        ly_rns_list.append(int(ly_m["nights"].sum()) if not ly_m.empty else 0)
+        cy_rev_list.append(float(cy_m["revenue"].sum()) if not cy_m.empty else 0.0)
+        ly_rev_list.append(float(ly_m["revenue"].sum()) if not ly_m.empty else 0.0)
+
+    bar_col = BRAND_GREEN
+    bar_col_ly = BRAND_LIGHT
+
+    fig_rns = go.Figure([
+        go.Bar(name="LY (same point)",  x=chart_months, y=ly_rns_list, marker_color=bar_col_ly),
+        go.Bar(name="OTB (this year)",  x=chart_months, y=cy_rns_list, marker_color=bar_col),
+    ])
+    fig_rns.update_layout(
+        barmode="group", title="Room Nights — OTB vs LY",
+        yaxis_title="Room Nights", legend=dict(orientation="h", y=1.1),
+        margin=dict(t=60, b=20), height=320,
     )
+
+    fig_rev = go.Figure([
+        go.Bar(name="LY (same point)",  x=chart_months, y=ly_rev_list, marker_color=bar_col_ly),
+        go.Bar(name="OTB (this year)",  x=chart_months, y=cy_rev_list, marker_color=bar_col),
+    ])
+    fig_rev.update_layout(
+        barmode="group", title="Revenue — OTB vs LY",
+        yaxis_title="£", yaxis_tickprefix="£", yaxis_tickformat=",.0f",
+        legend=dict(orientation="h", y=1.1),
+        margin=dict(t=60, b=20), height=320,
+    )
+
+    c1, c2 = st.columns(2)
+    c1.plotly_chart(fig_rns, use_container_width=True)
+    c2.plotly_chart(fig_rev, use_container_width=True)
 
     # ── Per property ──────────────────────────────────────────────────────────
     st.markdown("#### By Property")
