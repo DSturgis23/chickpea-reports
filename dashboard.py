@@ -1144,89 +1144,66 @@ with tabs[6]:
     with st.expander("ℹ️ How to read this report", expanded=False):
         st.markdown("""
 **What it shows:** For each future date in the next two months, how many rooms are currently
-on the books — compared to last year's equivalent position. Modelled on the Lighthouse report format.
+on the books — and how many of those rooms were added in the last 1, 3, and 7 days.
 
 **Columns explained:**
-- **Avail** — total rooms available across all properties on that date (accounts for Queen's Head expansion)
-- **RNs OTB** — Room Nights On The Books: how many rooms are currently confirmed for that date
+- **Avail** — total rooms available across all properties on that date
+- **RNs OTB** — Room Nights On The Books: total confirmed rooms for that date as of today
 - **Occ%** — current on-the-books occupancy: RNs OTB ÷ Avail
-- **ADR** — average rate of bookings currently on the books for that date
+- **ADR** — average daily rate of bookings currently on the books for that date
 - **RevPAR** — Revenue per Available Room based on current bookings
-- **LY RNs / LY Occ% / LY ADR** — last year's equivalent figures, counting only bookings that
-  had been made by the same calendar date last year
-- **Δ Occ pts** — occupancy point difference vs last year (e.g. +5 means 5 percentage points ahead)
+- **+1D** — rooms picked up in the last 1 day (bookings created yesterday or today)
+- **+3D** — rooms picked up in the last 3 days
+- **+7D** — rooms picked up in the last 7 days
 
-**Why it matters:** Pick-up shows where you have gaps to fill before arrival. A date showing
-low occupancy OTB with plenty of time to go is an opportunity for targeted promotions or
-last-minute rate adjustments. A date already at high occupancy may support a rate increase.
-
-**Note on historical pick-up (7/14/28 days ago):** To show how bookings have moved in the
-past week or fortnight, the app would need to store a daily snapshot of the OTB position.
-This can be added — speak to your developer to set up daily snapshot storage.
+**Why it matters:** Pick-up shows where momentum is building. A date with strong recent pick-up
+is filling fast — consider holding or raising rates. A date with zero pick-up and low occupancy
+needs attention: a promotion or rate adjustment may help drive demand.
         """)
-    st.info(
-        "📸 **Snapshot tracking not yet active.** This report currently shows today's position vs. "
-        "last year. To also show pick-up vs. 7, 14 and 28 days ago (as in the full Lighthouse format), "
-        "daily snapshots need to be stored. This can be added as a next step."
-    )
 
     # Period: current + next 2 months
     pu_start = date(TODAY.year, TODAY.month, 1)
     pu_end   = (pu_start + relativedelta(months=2)) - timedelta(days=1)
-    ly_pu_start = pu_start - relativedelta(years=1)
-    ly_pu_end   = pu_end   - relativedelta(years=1)
-    ly_ref_date = TODAY - relativedelta(years=1)
 
-    df_cy_pu     = loading_data(pu_start, pu_end)
-    df_ly_pu_all = loading_data(ly_pu_start, ly_pu_end)
+    df_pu = loading_data(pu_start, pu_end)
 
-    def filter_ly_pu(df):
-        if df.empty:
-            return df
-        mask = df["created"].apply(lambda d: d <= ly_ref_date if d else False)
-        return df[mask]
-
-    df_ly_pu = filter_ly_pu(df_ly_pu_all)
+    ref_1d = TODAY - timedelta(days=1)
+    ref_3d = TODAY - timedelta(days=3)
+    ref_7d = TODAY - timedelta(days=7)
 
     view_mode = st.radio("View", ["Group total", "By property"], horizontal=True, key="pu_view")
 
-    def pickup_table(cy_df, ly_df, props_list):
+    def pickup_table(df, props_list):
         rows = []
         d = pu_start
         while d <= pu_end:
-            ly_d = d - relativedelta(years=1)
             row = {
-                "Date":    d.strftime("%d %b"),
-                "Day":     d.strftime("%a"),
-                "Wk":      d.strftime("%V"),
+                "Date": d.strftime("%d %b"),
+                "Day":  d.strftime("%a"),
+                "Wk":   d.strftime("%V"),
             }
-            cy_rns = ly_rns = cy_rev = ly_rev = 0
+            rns = rev = pu1 = pu3 = pu7 = 0
             avail_total = 0
             for prop in props_list:
-                cy_p = cy_df[(cy_df["venue_name"] == prop) & (cy_df["checkin"] == d)] if not cy_df.empty else pd.DataFrame()
-                ly_p = ly_df[(ly_df["venue_name"] == prop) & (ly_df["checkin"] == ly_d)] if not ly_df.empty else pd.DataFrame()
-                cy_rns += int(cy_p["num_rooms"].sum()) if not cy_p.empty else 0
-                ly_rns += int(ly_p["num_rooms"].sum()) if not ly_p.empty else 0
-                cy_rev += cy_p["revenue"].sum() if not cy_p.empty else 0
-                ly_rev += ly_p["revenue"].sum() if not ly_p.empty else 0
+                p = df[(df["venue_name"] == prop) & (df["checkin"] == d)] if not df.empty else pd.DataFrame()
+                if not p.empty:
+                    rns += int(p["num_rooms"].sum())
+                    rev += p["revenue"].sum()
+                    pu1 += int(p[p["created"] >= ref_1d]["num_rooms"].sum())
+                    pu3 += int(p[p["created"] >= ref_3d]["num_rooms"].sum())
+                    pu7 += int(p[p["created"] >= ref_7d]["num_rooms"].sum())
                 avail_total += get_room_count(prop, d)
-
-            occ_cy  = cy_rns / avail_total if avail_total else 0
-            occ_ly  = ly_rns / avail_total if avail_total else 0
-            adr_cy  = cy_rev / cy_rns if cy_rns else 0
-            adr_ly  = ly_rev / ly_rns if ly_rns else 0
-            var_occ = (occ_cy - occ_ly) * 100
-
+            occ = rns / avail_total if avail_total else 0
+            adr = rev / rns         if rns         else 0
             row.update({
-                "Avail":      avail_total,
-                "RNs OTB":    cy_rns or "—",
-                "Occ%":       f"{occ_cy*100:.0f}%",
-                "ADR":        fmt_gbp(adr_cy) if adr_cy else "—",
-                "RevPAR":     fmt_gbp(cy_rev / avail_total) if avail_total else "—",
-                "LY RNs":     ly_rns or "—",
-                "LY Occ%":    f"{occ_ly*100:.0f}%",
-                "LY ADR":     fmt_gbp(adr_ly) if adr_ly else "—",
-                "Δ Occ pts":  f"{'+' if var_occ >= 0 else ''}{var_occ:.0f}",
+                "Avail":   avail_total,
+                "RNs OTB": rns or "—",
+                "Occ%":    f"{occ*100:.0f}%",
+                "ADR":     fmt_gbp(adr) if adr else "—",
+                "RevPAR":  fmt_gbp(rev / avail_total) if avail_total else "—",
+                "+1D":     f"+{pu1}" if pu1 else "—",
+                "+3D":     f"+{pu3}" if pu3 else "—",
+                "+7D":     f"+{pu7}" if pu7 else "—",
             })
             rows.append(row)
             d += timedelta(days=1)
@@ -1234,76 +1211,65 @@ This can be added — speak to your developer to set up daily snapshot storage.
 
     if view_mode == "Group total":
         st.dataframe(
-            pickup_table(df_cy_pu, df_ly_pu, PROP_NAMES),
+            pickup_table(df_pu, PROP_NAMES),
             hide_index=True, use_container_width=True,
         )
     else:
         for prop in PROP_NAMES:
-            cy_p  = df_cy_pu[df_cy_pu["venue_name"] == prop]  if not df_cy_pu.empty  else pd.DataFrame()
-            ly_p  = df_ly_pu[df_ly_pu["venue_name"] == prop]  if not df_ly_pu.empty  else pd.DataFrame()
+            p = df_pu[df_pu["venue_name"] == prop] if not df_pu.empty else pd.DataFrame()
             with st.expander(prop, expanded=False):
                 st.dataframe(
-                    pickup_table(cy_p, ly_p, [prop]),
+                    pickup_table(p, [prop]),
                     hide_index=True, use_container_width=True,
                 )
 
     # ── Charts ────────────────────────────────────────────────────────────────
     import plotly.graph_objects as go
     st.divider()
-    st.markdown("#### Charts — Group Occupancy & ADR by Date")
+    st.markdown("#### Charts — Group Occupancy & 7-Day Pick-up by Stay Date")
 
-    pu_dates, pu_occ_cy, pu_occ_ly, pu_adr_cy, pu_adr_ly = [], [], [], [], []
+    pu_dates, pu_occ, pu_pu7 = [], [], []
     d = pu_start
     while d <= pu_end:
-        ly_d = d - relativedelta(years=1)
-        cy_rns = ly_rns = cy_rev = ly_rev = avail_total = 0
+        rns = pu7 = avail_total = 0
         for prop in PROP_NAMES:
-            cy_p = df_cy_pu[(df_cy_pu["venue_name"] == prop) & (df_cy_pu["checkin"] == d)] if not df_cy_pu.empty else pd.DataFrame()
-            ly_p = df_ly_pu[(df_ly_pu["venue_name"] == prop) & (df_ly_pu["checkin"] == ly_d)] if not df_ly_pu.empty else pd.DataFrame()
-            cy_rns += int(cy_p["num_rooms"].sum()) if not cy_p.empty else 0
-            ly_rns += int(ly_p["num_rooms"].sum()) if not ly_p.empty else 0
-            cy_rev += cy_p["revenue"].sum() if not cy_p.empty else 0
-            ly_rev += ly_p["revenue"].sum() if not ly_p.empty else 0
+            p = df_pu[(df_pu["venue_name"] == prop) & (df_pu["checkin"] == d)] if not df_pu.empty else pd.DataFrame()
+            if not p.empty:
+                rns += int(p["num_rooms"].sum())
+                pu7 += int(p[p["created"] >= ref_7d]["num_rooms"].sum())
             avail_total += get_room_count(prop, d)
         pu_dates.append(d.strftime("%d %b"))
-        pu_occ_cy.append(cy_rns / avail_total * 100 if avail_total else 0)
-        pu_occ_ly.append(ly_rns / avail_total * 100 if avail_total else 0)
-        pu_adr_cy.append(cy_rev / cy_rns if cy_rns else None)
-        pu_adr_ly.append(ly_rev / ly_rns if ly_rns else None)
+        pu_occ.append(rns / avail_total * 100 if avail_total else 0)
+        pu_pu7.append(pu7)
         d += timedelta(days=1)
 
     fig_pu_occ = go.Figure([
-        go.Scatter(x=pu_dates, y=pu_occ_ly, name="LY Occ%", mode="lines",
-                   line=dict(color=BRAND_LIGHT, width=2, dash="dot")),
-        go.Scatter(x=pu_dates, y=pu_occ_cy, name="OTB Occ%", mode="lines",
+        go.Scatter(x=pu_dates, y=pu_occ, name="OTB Occ%", mode="lines",
                    line=dict(color=BRAND_GREEN, width=2), fill="tozeroy",
-                   fillcolor=f"rgba(45,106,79,0.12)"),
+                   fillcolor="rgba(45,106,79,0.12)"),
     ])
     fig_pu_occ.update_layout(
-        title="Occupancy % — OTB vs Last Year",
+        title="Occupancy % — On The Books",
         yaxis_title="Occupancy %", yaxis_ticksuffix="%",
         xaxis_tickangle=-45,
         legend=dict(orientation="h", y=1.1),
         margin=dict(t=60, b=60), height=340,
     )
 
-    fig_pu_adr = go.Figure([
-        go.Scatter(x=pu_dates, y=pu_adr_ly, name="LY ADR", mode="lines",
-                   line=dict(color=BRAND_LIGHT, width=2, dash="dot")),
-        go.Scatter(x=pu_dates, y=pu_adr_cy, name="OTB ADR", mode="lines",
-                   line=dict(color=BRAND_GREEN, width=2)),
+    fig_pu7 = go.Figure([
+        go.Bar(x=pu_dates, y=pu_pu7, name="7-Day Pick-up",
+               marker_color=BRAND_GREEN, opacity=0.8),
     ])
-    fig_pu_adr.update_layout(
-        title="ADR — OTB vs Last Year",
-        yaxis_title="ADR (£)", yaxis_tickprefix="£", yaxis_tickformat=",.0f",
+    fig_pu7.update_layout(
+        title="Rooms Picked Up — Last 7 Days by Stay Date",
+        yaxis_title="Room Nights",
         xaxis_tickangle=-45,
-        legend=dict(orientation="h", y=1.1),
         margin=dict(t=60, b=60), height=340,
     )
 
     c1, c2 = st.columns(2)
     c1.plotly_chart(fig_pu_occ, use_container_width=True)
-    c2.plotly_chart(fig_pu_adr, use_container_width=True)
+    c2.plotly_chart(fig_pu7, use_container_width=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
