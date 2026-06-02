@@ -209,29 +209,13 @@ def _fetch_property(token: str, venue_name: str, cfg: dict, from_date: date, to_
 
 
 def _fetch_property_by_stay(token: str, venue_name: str, cfg: dict, from_date: date, to_date: date) -> list:
-    """Fetch bookings with any stay night in [from_date, to_date] using checkout+checkin overlap."""
-    shortname = cfg["shortname"]
-    seen: dict = {}
-    try:
-        resp = requests.get(
-            f"{EVIIVO_API_URL}/property/{shortname}/bookings",
-            headers=_headers(token),
-            params={
-                "request.CheckInTo":    to_date.strftime("%Y-%m-%d"),
-                "request.CheckOutFrom": from_date.strftime("%Y-%m-%d"),
-            },
-            timeout=60,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        records = data.get("Bookings", data if isinstance(data, list) else [])
-        for rec in records:
-            parsed = _parse_booking(rec, venue_name)
-            if parsed and parsed["booking_ref"] not in seen:
-                seen[parsed["booking_ref"]] = parsed
-    except Exception:
-        pass
-    return list(seen.values())
+    """Fetch bookings with any stay night in [from_date, to_date].
+    Eviivo only supports check-in date filtering, so we extend the window back
+    60 days to capture guests who checked in before from_date but are still in-house.
+    The stay-date filter in the dashboard limits counted nights to the requested range.
+    """
+    extended_from = from_date - timedelta(days=60)
+    return _fetch_property(token, venue_name, cfg, extended_from, to_date)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
