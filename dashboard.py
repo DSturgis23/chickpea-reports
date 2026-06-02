@@ -1155,24 +1155,47 @@ Bookings can still come in or cancel before the month arrives.
 # TAB 7 — Pick-up Report
 # ─────────────────────────────────────────────────────────────────────────────
 
-RATE_LOG_PATH = "data/rate_changes.csv"
-_RATE_LOG_COLS = ["date", "property", "category", "notes"]
+_RATE_LOG_COLS   = ["date", "property", "category", "notes"]
+_RATE_LOG_REPO   = "DSturgis23/chickpea-reports"
+_RATE_LOG_GHPATH = "data/rate_changes.csv"
+
+
+def _gh_headers() -> dict:
+    token = st.secrets.get("github_token", "")
+    return {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+
 
 def _load_rate_log() -> pd.DataFrame:
-    import os
-    if not os.path.exists(RATE_LOG_PATH):
-        return pd.DataFrame(columns=_RATE_LOG_COLS)
+    import base64, requests as _req
     try:
-        df = pd.read_csv(RATE_LOG_PATH, dtype=str).fillna("")
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-        return df.dropna(subset=["date"]).reset_index(drop=True)
+        resp = _req.get(
+            f"https://api.github.com/repos/{_RATE_LOG_REPO}/contents/{_RATE_LOG_GHPATH}",
+            headers=_gh_headers(), timeout=15,
+        )
+        if resp.status_code == 200:
+            content = base64.b64decode(resp.json()["content"]).decode()
+            from io import StringIO
+            df = pd.read_csv(StringIO(content), dtype=str).fillna("")
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+            return df.dropna(subset=["date"]).reset_index(drop=True)
     except Exception:
-        return pd.DataFrame(columns=_RATE_LOG_COLS)
+        pass
+    return pd.DataFrame(columns=_RATE_LOG_COLS)
+
 
 def _save_rate_log(df: pd.DataFrame):
-    import os
-    os.makedirs("data", exist_ok=True)
-    df.to_csv(RATE_LOG_PATH, index=False)
+    import base64, requests as _req
+    content = df.to_csv(index=False)
+    encoded = base64.b64encode(content.encode()).decode()
+    # Get current SHA (required for update)
+    url = f"https://api.github.com/repos/{_RATE_LOG_REPO}/contents/{_RATE_LOG_GHPATH}"
+    get_resp = _req.get(url, headers=_gh_headers(), timeout=15)
+    payload = {"message": "Update rate change log", "content": encoded}
+    if get_resp.status_code == 200:
+        payload["sha"] = get_resp.json()["sha"]
+    put_resp = _req.put(url, headers=_gh_headers(), json=payload, timeout=15)
+    if put_resp.status_code not in (200, 201):
+        st.error(f"Could not save rate log to GitHub ({put_resp.status_code}). Check github_token in secrets.")
 
 with tabs[6]:
     st.subheader("Pick-up Report")
