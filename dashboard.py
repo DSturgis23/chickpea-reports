@@ -1154,33 +1154,51 @@ Bookings can still come in or cancel before the month arrives.
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 7 — Pick-up Report
 # ─────────────────────────────────────────────────────────────────────────────
+
+RATE_LOG_PATH = "data/rate_changes.csv"
+_RATE_LOG_COLS = ["date", "property", "category", "notes"]
+
+def _load_rate_log() -> pd.DataFrame:
+    import os
+    if not os.path.exists(RATE_LOG_PATH):
+        return pd.DataFrame(columns=_RATE_LOG_COLS)
+    try:
+        df = pd.read_csv(RATE_LOG_PATH, dtype=str).fillna("")
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        return df.dropna(subset=["date"]).reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=_RATE_LOG_COLS)
+
+def _save_rate_log(df: pd.DataFrame):
+    import os
+    os.makedirs("data", exist_ok=True)
+    df.to_csv(RATE_LOG_PATH, index=False)
+
 with tabs[6]:
-    st.subheader("Occupancy Pick-up Report")
+    st.subheader("Pick-up Report")
     with st.expander("ℹ️ How to read this report", expanded=False):
         st.markdown("""
-**What it shows:** For each future date in the next two months, how many rooms are currently
-on the books — and how many of those rooms were added in the last 1, 3, and 7 days.
+**What it shows:** For each date in the next 3 months, confirmed rooms in-house that night,
+key revenue metrics, average length of stay, and how many rooms were recently picked up.
 
 **Columns explained:**
-- **Avail** — total rooms available across all properties on that date
-- **RNs OTB** — Room Nights On The Books: total confirmed rooms for that date as of today
-- **Occ%** — current on-the-books occupancy: RNs OTB ÷ Avail
-- **ADR** — average daily rate of bookings currently on the books for that date
-- **RevPAR** — Revenue per Available Room based on current bookings
-- **+1D** — rooms picked up in the last 1 day (bookings created yesterday or today)
-- **+3D** — rooms picked up in the last 3 days
-- **+7D** — rooms picked up in the last 7 days
+- **Avail** — total rooms available on that date
+- **RNs OTB** — confirmed rooms in-house that night (guests already booked for that stay date)
+- **Occ%** — RNs OTB ÷ Avail
+- **ADR** — average nightly rate of bookings in-house (revenue ÷ rooms, nightly share only)
+- **RevPAR** — nightly revenue ÷ available rooms
+- **Avg LOS** — average length of stay of bookings that include this night
+- **+1D / +3D / +7D** — rooms added to the books in the last 1, 3 or 7 days for that stay date
 
-**Why it matters:** Pick-up shows where momentum is building. A date with strong recent pick-up
-is filling fast — consider holding or raising rates. A date with zero pick-up and low occupancy
-needs attention: a promotion or rate adjustment may help drive demand.
+**Rate & Restriction Log:** Record rate changes, min LOS updates, promotions, and stop-sells
+below. They appear as markers on the charts so you can see whether pick-up responded.
         """)
 
-    # Period: current + next 2 months
+    # Period: current month + next 3 months
     pu_start = date(TODAY.year, TODAY.month, 1)
-    pu_end   = (pu_start + relativedelta(months=2)) - timedelta(days=1)
+    pu_end   = (pu_start + relativedelta(months=3)) - timedelta(days=1)
 
-    df_pu = loading_data(pu_start, pu_end)
+    df_pu = loading_stay_data(pu_start, pu_end)
 
     ref_1d = TODAY - timedelta(days=1)
     ref_3d = TODAY - timedelta(days=3)
@@ -1197,25 +1215,32 @@ needs attention: a promotion or rate adjustment may help drive demand.
                 "Day":  d.strftime("%a"),
                 "Wk":   d.strftime("%V"),
             }
-            rns = rev = pu1 = pu3 = pu7 = 0
+            rns = rev = pu1 = pu3 = pu7 = los_nights = los_count = 0
             avail_total = 0
             for prop in props_list:
-                p = df[(df["venue_name"] == prop) & (df["checkin"] == d)] if not df.empty else pd.DataFrame()
+                p = df[
+                    (df["venue_name"] == prop) &
+                    (df["checkin"] <= d) & (df["checkout"] > d)
+                ] if not df.empty else pd.DataFrame()
                 if not p.empty:
-                    rns += int(p["num_rooms"].sum())
-                    rev += p["revenue"].sum()
-                    pu1 += int(p[p["created"] >= ref_1d]["num_rooms"].sum())
-                    pu3 += int(p[p["created"] >= ref_3d]["num_rooms"].sum())
-                    pu7 += int(p[p["created"] >= ref_7d]["num_rooms"].sum())
+                    rns        += int(p["num_rooms"].sum())
+                    rev        += (p["revenue"] / p["nights"].replace(0, 1)).sum()
+                    pu1        += int(p[p["created"] >= ref_1d]["num_rooms"].sum())
+                    pu3        += int(p[p["created"] >= ref_3d]["num_rooms"].sum())
+                    pu7        += int(p[p["created"] >= ref_7d]["num_rooms"].sum())
+                    los_nights += p["nights"].sum()
+                    los_count  += len(p)
                 avail_total += get_room_count(prop, d)
-            occ = rns / avail_total if avail_total else 0
-            adr = rev / rns         if rns         else 0
+            occ     = rns / avail_total if avail_total else 0
+            adr     = rev / rns         if rns         else 0
+            avg_los = los_nights / los_count if los_count else 0
             row.update({
                 "Avail":   avail_total,
                 "RNs OTB": rns or "—",
                 "Occ%":    f"{occ*100:.0f}%",
                 "ADR":     fmt_gbp(adr) if adr else "—",
                 "RevPAR":  fmt_gbp(rev / avail_total) if avail_total else "—",
+                "Avg LOS": f"{avg_los:.1f}" if avg_los else "—",
                 "+1D":     f"+{pu1}" if pu1 else "—",
                 "+3D":     f"+{pu3}" if pu3 else "—",
                 "+7D":     f"+{pu7}" if pu7 else "—",
@@ -1238,53 +1263,177 @@ needs attention: a promotion or rate adjustment may help drive demand.
                     hide_index=True, use_container_width=True,
                 )
 
+    # ── Rate & Restriction Change Log ─────────────────────────────────────────
+    st.divider()
+    st.markdown("#### Rate & Restriction Change Log")
+    st.caption(
+        "Log rate changes, min LOS updates, promotions, and stop-sells. "
+        "Entries are marked on the charts below so you can correlate changes with pick-up."
+    )
+
+    rate_log = _load_rate_log()
+
+    with st.expander("➕ Log a change"):
+        with st.form("rate_log_form", clear_on_submit=True):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                log_date = st.date_input("Date of change", value=TODAY, key="rl_date")
+            with c2:
+                log_prop = st.selectbox("Property", ["All properties"] + PROP_NAMES, key="rl_prop")
+            with c3:
+                log_cat = st.selectbox(
+                    "Category",
+                    ["Rate change", "Min LOS change", "Promotion", "Stop sell", "Re-open", "Other"],
+                    key="rl_cat",
+                )
+            log_notes = st.text_input(
+                "Details  (e.g. 'Weekend rate £150 → £130, min stay reduced to 1 night')",
+                key="rl_notes",
+            )
+            if st.form_submit_button("Save") and log_notes.strip():
+                new_row = pd.DataFrame([{
+                    "date":     log_date.isoformat(),
+                    "property": log_prop,
+                    "category": log_cat,
+                    "notes":    log_notes.strip(),
+                }])
+                _save_rate_log(pd.concat([rate_log, new_row], ignore_index=True))
+                st.success("Logged.")
+                st.rerun()
+
+    if not rate_log.empty:
+        with st.expander("🗑 Delete an entry"):
+            del_idx = st.selectbox(
+                "Select entry to remove",
+                options=rate_log.index.tolist(),
+                format_func=lambda i: (
+                    f"{rate_log.loc[i, 'date']}  —  "
+                    f"{rate_log.loc[i, 'category']}  —  "
+                    f"{str(rate_log.loc[i, 'notes'])[:60]}"
+                ),
+            )
+            if st.button("Delete selected entry"):
+                _save_rate_log(rate_log.drop(index=del_idx).reset_index(drop=True))
+                st.rerun()
+
+        disp_log = rate_log.copy()
+        disp_log["date"] = disp_log["date"].apply(
+            lambda x: x.strftime("%d %b %Y") if hasattr(x, "strftime") else x
+        )
+        disp_log.columns = ["Date", "Property", "Category", "Notes"]
+        st.dataframe(disp_log.sort_values("Date", ascending=False), hide_index=True, use_container_width=True)
+    else:
+        st.info("No changes logged yet.")
+
     # ── Charts ────────────────────────────────────────────────────────────────
     import plotly.graph_objects as go
     st.divider()
-    st.markdown("#### Charts — Group Occupancy & 7-Day Pick-up by Stay Date")
+    st.markdown("#### Charts")
 
-    pu_dates, pu_occ, pu_pu7 = [], [], []
+    pu_dates, pu_occ, pu_pu7, pu_adr, pu_los = [], [], [], [], []
     d = pu_start
     while d <= pu_end:
         rns = pu7 = avail_total = 0
+        rev_tot = los_nights = los_count = 0
         for prop in PROP_NAMES:
-            p = df_pu[(df_pu["venue_name"] == prop) & (df_pu["checkin"] == d)] if not df_pu.empty else pd.DataFrame()
+            p = df_pu[
+                (df_pu["venue_name"] == prop) &
+                (df_pu["checkin"] <= d) & (df_pu["checkout"] > d)
+            ] if not df_pu.empty else pd.DataFrame()
             if not p.empty:
-                rns += int(p["num_rooms"].sum())
-                pu7 += int(p[p["created"] >= ref_7d]["num_rooms"].sum())
+                rns        += int(p["num_rooms"].sum())
+                pu7        += int(p[p["created"] >= ref_7d]["num_rooms"].sum())
+                rev_tot    += (p["revenue"] / p["nights"].replace(0, 1)).sum()
+                los_nights += p["nights"].sum()
+                los_count  += len(p)
             avail_total += get_room_count(prop, d)
         pu_dates.append(d.strftime("%d %b"))
         pu_occ.append(rns / avail_total * 100 if avail_total else 0)
         pu_pu7.append(pu7)
+        pu_adr.append(float(rev_tot / rns) if rns else None)
+        pu_los.append(float(los_nights / los_count) if los_count else None)
         d += timedelta(days=1)
+
+    _CAT_COLORS = {
+        "Rate change":    "#e63946",
+        "Min LOS change": "#f4a261",
+        "Promotion":      "#2a9d8f",
+        "Stop sell":      "#6d6875",
+        "Re-open":        "#457b9d",
+        "Other":          "#adb5bd",
+    }
+
+    def _add_rate_events(fig):
+        if rate_log.empty:
+            return
+        for _, row in rate_log.iterrows():
+            label = row["date"].strftime("%d %b") if hasattr(row["date"], "strftime") else ""
+            if label not in pu_dates:
+                continue
+            color = _CAT_COLORS.get(row["category"], "#adb5bd")
+            fig.add_vline(
+                x=label, line_dash="dot", line_color=color, line_width=1.5,
+                annotation_text=row["category"],
+                annotation_position="top",
+                annotation_font_size=9,
+                annotation_font_color=color,
+            )
 
     fig_pu_occ = go.Figure([
         go.Scatter(x=pu_dates, y=pu_occ, name="OTB Occ%", mode="lines",
                    line=dict(color=BRAND_GREEN, width=2), fill="tozeroy",
                    fillcolor="rgba(45,106,79,0.12)"),
     ])
+    _add_rate_events(fig_pu_occ)
     fig_pu_occ.update_layout(
         title="Occupancy % — On The Books",
         yaxis_title="Occupancy %", yaxis_ticksuffix="%",
-        xaxis_tickangle=-45,
-        legend=dict(orientation="h", y=1.1),
-        margin=dict(t=60, b=60), height=340,
+        xaxis_tickangle=-45, legend=dict(orientation="h", y=1.1),
+        margin=dict(t=80, b=60), height=360,
     )
 
     fig_pu7 = go.Figure([
         go.Bar(x=pu_dates, y=pu_pu7, name="7-Day Pick-up",
                marker_color=BRAND_GREEN, opacity=0.8),
     ])
+    _add_rate_events(fig_pu7)
     fig_pu7.update_layout(
         title="Rooms Picked Up — Last 7 Days by Stay Date",
         yaxis_title="Room Nights",
         xaxis_tickangle=-45,
-        margin=dict(t=60, b=60), height=340,
+        margin=dict(t=80, b=60), height=360,
+    )
+
+    fig_adr = go.Figure([
+        go.Scatter(x=pu_dates, y=pu_adr, name="ADR", mode="lines",
+                   line=dict(color=BRAND_GREEN, width=2), connectgaps=True),
+    ])
+    _add_rate_events(fig_adr)
+    fig_adr.update_layout(
+        title="ADR — On The Books by Stay Date",
+        yaxis_title="ADR (£)", yaxis_tickprefix="£", yaxis_tickformat=",.0f",
+        xaxis_tickangle=-45,
+        margin=dict(t=80, b=60), height=320,
+    )
+
+    fig_los = go.Figure([
+        go.Scatter(x=pu_dates, y=pu_los, name="Avg LOS", mode="lines",
+                   line=dict(color=BRAND_LIGHT, width=2), connectgaps=True),
+    ])
+    _add_rate_events(fig_los)
+    fig_los.update_layout(
+        title="Average Length of Stay — On The Books by Stay Date",
+        yaxis_title="Nights",
+        xaxis_tickangle=-45,
+        margin=dict(t=80, b=60), height=320,
     )
 
     c1, c2 = st.columns(2)
     c1.plotly_chart(fig_pu_occ, use_container_width=True)
     c2.plotly_chart(fig_pu7, use_container_width=True)
+    c1b, c2b = st.columns(2)
+    c1b.plotly_chart(fig_adr, use_container_width=True)
+    c2b.plotly_chart(fig_los, use_container_width=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
