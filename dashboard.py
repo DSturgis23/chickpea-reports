@@ -1223,9 +1223,14 @@ below. They appear as markers on the charts so you can see whether pick-up respo
 
     df_pu = loading_stay_data(pu_start, pu_end)
 
-    ref_1d = TODAY - timedelta(days=1)
-    ref_3d = TODAY - timedelta(days=3)
-    ref_7d = TODAY - timedelta(days=7)
+    YESTERDAY     = TODAY - timedelta(days=1)
+    ref_1d        = TODAY                                                      # today only
+    ref_3d        = TODAY - timedelta(days=2)                                  # last 3 days incl. today
+    ref_7d        = TODAY - timedelta(days=6)                                  # last 7 days incl. today
+    last_wk_start = TODAY - timedelta(days=TODAY.weekday() + 7)                # Mon of last week
+    last_wk_end   = TODAY - timedelta(days=TODAY.weekday() + 1)                # Sun of last week
+    last_mth_start = (date(TODAY.year, TODAY.month, 1) - relativedelta(months=1))
+    last_mth_end   = date(TODAY.year, TODAY.month, 1) - timedelta(days=1)
 
     view_mode = st.radio("View", ["Group total", "By property"], horizontal=True, key="pu_view")
 
@@ -1238,7 +1243,7 @@ below. They appear as markers on the charts so you can see whether pick-up respo
                 "Day":  d.strftime("%a"),
                 "Wk":   d.strftime("%V"),
             }
-            rns = rev = pu1 = pu3 = pu7 = los_nights = los_count = 0
+            rns = rev = pu1 = pu_yest = pu3 = pu7 = pu_lwk = pu_lmth = los_nights = los_count = 0
             avail_total = 0
             for prop in props_list:
                 p = df[
@@ -1248,9 +1253,12 @@ below. They appear as markers on the charts so you can see whether pick-up respo
                 if not p.empty:
                     rns        += int(p["num_rooms"].sum())
                     rev        += (p["revenue"] / p["nights"].replace(0, 1)).sum()
-                    pu1        += int(p[p["created"] >= ref_1d]["num_rooms"].sum())
+                    pu1        += int(p[p["created"] == ref_1d]["num_rooms"].sum())
+                    pu_yest    += int(p[p["created"] == YESTERDAY]["num_rooms"].sum())
                     pu3        += int(p[p["created"] >= ref_3d]["num_rooms"].sum())
                     pu7        += int(p[p["created"] >= ref_7d]["num_rooms"].sum())
+                    pu_lwk     += int(p[(p["created"] >= last_wk_start) & (p["created"] <= last_wk_end)]["num_rooms"].sum())
+                    pu_lmth    += int(p[(p["created"] >= last_mth_start) & (p["created"] <= last_mth_end)]["num_rooms"].sum())
                     los_nights += p["nights"].sum()
                     los_count  += len(p)
                 avail_total += get_room_count(prop, d)
@@ -1258,15 +1266,18 @@ below. They appear as markers on the charts so you can see whether pick-up respo
             adr     = rev / rns         if rns         else 0
             avg_los = los_nights / los_count if los_count else 0
             row.update({
-                "Avail":   avail_total,
-                "RNs OTB": rns or "—",
-                "Occ%":    f"{occ*100:.0f}%",
-                "ADR":     fmt_gbp(adr) if adr else "—",
-                "RevPAR":  fmt_gbp(rev / avail_total) if avail_total else "—",
-                "Avg LOS": f"{avg_los:.1f}" if avg_los else "—",
-                "+1D":     f"+{pu1}" if pu1 else "—",
-                "+3D":     f"+{pu3}" if pu3 else "—",
-                "+7D":     f"+{pu7}" if pu7 else "—",
+                "Avail":    avail_total,
+                "RNs OTB":  rns or "—",
+                "Occ%":     f"{occ*100:.0f}%",
+                "ADR":      fmt_gbp(adr) if adr else "—",
+                "RevPAR":   fmt_gbp(rev / avail_total) if avail_total else "—",
+                "Avg LOS":  f"{avg_los:.1f}" if avg_los else "—",
+                "Today":    f"+{pu1}" if pu1 else "—",
+                "Yest":     f"+{pu_yest}" if pu_yest else "—",
+                "+3D":      f"+{pu3}" if pu3 else "—",
+                "+7D":      f"+{pu7}" if pu7 else "—",
+                "Last wk":  f"+{pu_lwk}" if pu_lwk else "—",
+                "Last mth": f"+{pu_lmth}" if pu_lmth else "—",
             })
             rows.append(row)
             d += timedelta(days=1)
@@ -1365,7 +1376,7 @@ below. They appear as markers on the charts so you can see whether pick-up respo
             ] if not df_pu.empty else pd.DataFrame()
             if not p.empty:
                 rns        += int(p["num_rooms"].sum())
-                pu7        += int(p[p["created"] >= ref_7d]["num_rooms"].sum())
+                pu7        += int(p[p["created"] >= ref_7d]["num_rooms"].sum())  # last 7 days incl. today
                 rev_tot    += (p["revenue"] / p["nights"].replace(0, 1)).sum()
                 los_nights += p["nights"].sum()
                 los_count  += len(p)
