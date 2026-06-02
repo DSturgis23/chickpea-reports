@@ -16,7 +16,7 @@ from config import (
     PROPERTIES, get_room_count, BRAND_GREEN, BRAND_LIGHT, APP_PASSWORD,
     is_pre_opening, is_partial_opening, closure_note, partial_closure_note,
 )
-from eviivo import fetch_bookings
+from eviivo import fetch_bookings, fetch_bookings_by_stay
 
 st.set_page_config(
     page_title="Chickpea — Performance Reports",
@@ -146,6 +146,21 @@ def fmt_var(v, is_pct=False):
 
 def avail_nights_in_range(prop: str, dates: list) -> int:
     return sum(get_room_count(prop, d) for d in dates)
+
+
+def loading_stay_data(from_d: date, to_d: date) -> pd.DataFrame:
+    """Fetch all bookings with any stay night in [from_d, to_d] (in-house guests)."""
+    try:
+        with st.spinner("Fetching data from Eviivo…"):
+            raw = fetch_bookings_by_stay(from_d, to_d)
+        return confirmed(to_df(raw))
+    except Exception as e:
+        st.error(
+            "Could not fetch data from Eviivo. "
+            "If you are the app owner, check that API credentials are set correctly in Streamlit secrets. "
+            f"Error type: {type(e).__name__}"
+        )
+        return pd.DataFrame()
 
 
 def loading_data(from_d: date, to_d: date) -> pd.DataFrame:
@@ -412,7 +427,7 @@ with tabs[1]:
     with c2:
         wk_to   = st.date_input("To",   value=TODAY, key="wk_to")
 
-    df_wk = loading_data(wk_from, wk_to)
+    df_wk = loading_stay_data(wk_from, wk_to)
 
     if df_wk.empty:
         st.info("No confirmed bookings in this period.")

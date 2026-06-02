@@ -208,6 +208,54 @@ def _fetch_property(token: str, venue_name: str, cfg: dict, from_date: date, to_
     return list(seen.values())
 
 
+def _fetch_property_by_stay(token: str, venue_name: str, cfg: dict, from_date: date, to_date: date) -> list:
+    """Fetch bookings with any stay night in [from_date, to_date] using checkout+checkin overlap."""
+    shortname = cfg["shortname"]
+    seen: dict = {}
+    try:
+        resp = requests.get(
+            f"{EVIIVO_API_URL}/property/{shortname}/bookings",
+            headers=_headers(token),
+            params={
+                "request.CheckInTo":    to_date.strftime("%Y-%m-%d"),
+                "request.CheckOutFrom": from_date.strftime("%Y-%m-%d"),
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        records = data.get("Bookings", data if isinstance(data, list) else [])
+        for rec in records:
+            parsed = _parse_booking(rec, venue_name)
+            if parsed and parsed["booking_ref"] not in seen:
+                seen[parsed["booking_ref"]] = parsed
+    except Exception:
+        pass
+    return list(seen.values())
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_bookings_by_stay(from_date: date, to_date: date) -> list:
+    """Fetch all bookings with any stay night in [from_date, to_date], in parallel."""
+    token = get_token()
+    all_bookings = []
+    errors = []
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(_fetch_property_by_stay, token, name, cfg, from_date, to_date): name
+            for name, cfg in PROPERTIES.items()
+        }
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                all_bookings.extend(future.result())
+            except Exception as e:
+                errors.append(f"{name}: {e}")
+    if errors:
+        st.warning("Some properties had fetch errors: " + "; ".join(errors))
+    return all_bookings
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_bookings(from_date: date, to_date: date) -> list:
     """Fetch all bookings (by check-in date) across all properties in parallel."""
