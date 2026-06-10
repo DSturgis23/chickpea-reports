@@ -15,7 +15,7 @@ warnings.filterwarnings("ignore")
 from config import (
     PROPERTIES, get_room_count, BRAND_GREEN, BRAND_LIGHT, APP_PASSWORD,
     is_pre_opening, is_partial_opening, closure_note, partial_closure_note,
-    OPENING_DATES,
+    OPENING_DATES, room_block_notes,
 )
 from eviivo import fetch_bookings, fetch_bookings_by_stay
 
@@ -458,6 +458,10 @@ with tabs[1]:
 
             all_dates  = [wk_from + timedelta(days=i) for i in range((wk_to - wk_from).days + 1)]
 
+            for prop in PROP_NAMES:
+                for note in room_block_notes(prop, all_dates):
+                    st.info(f"**{prop}**: {note} — excluded from available room-nights below.")
+
             def kpi_table(subset_df, dates_list):
                 results = []
                 for prop in PROP_NAMES:
@@ -514,32 +518,37 @@ with tabs[1]:
                     return None
                 return (curr - prev) / prev * 100
 
-            def yoy_row(label, curr, prev, not_open_ly):
+            def yoy_row(label, curr, prev, not_open_ly, capacity_changed=False):
                 if not_open_ly:
                     return {"Property": label, "Room Nights Sold": "Not open (LY)",
                             "Revenue": "Not open (LY)", "ADR": "Not open (LY)",
                             "Occupancy": "Not open (LY)", "RevPAR": "Not open (LY)"}
-                row = {"Property": label}
+                display_label = f"{label} *" if capacity_changed else label
+                row = {"Property": display_label}
                 for key, col in [("rns", "Room Nights Sold"), ("rev", "Revenue"),
-                                  ("adr", "ADR"), ("revpar", "RevPAR")]:
+                                  ("adr", "ADR"), ("occ", "Occupancy"), ("revpar", "RevPAR")]:
                     pc = pct_change(curr[key], prev[key])
                     row[col] = fmt_pct(pc) if pc is not None else "—"
-                occ_diff = (curr["occ"] - prev["occ"]) * 100
-                sign = "+" if occ_diff > 0 else ""
-                row["Occupancy"] = f"{sign}{occ_diff:.1f}pp"
                 return row
 
             yoy_rows = []
+            avail_curr_total, avail_prev_total = 0, 0
             for prop in PROP_NAMES:
                 opening = OPENING_DATES.get(prop)
                 not_open_ly = bool(opening) and all(d < opening for d in all_dates_ly)
                 curr_v = kpi_values(sdf, all_dates, prop)
                 prev_v = kpi_values(sdf_ly, all_dates_ly, prop)
-                yoy_rows.append(yoy_row(prop, curr_v, prev_v, not_open_ly))
+                avail_curr = avail_nights_in_range(prop, all_dates)
+                avail_prev = avail_nights_in_range(prop, all_dates_ly)
+                avail_curr_total += avail_curr
+                avail_prev_total += avail_prev
+                capacity_changed = (not not_open_ly) and avail_curr != avail_prev
+                yoy_rows.append(yoy_row(prop, curr_v, prev_v, not_open_ly, capacity_changed))
 
             curr_t = kpi_values(sdf, all_dates, None)
             prev_t = kpi_values(sdf_ly, all_dates_ly, None)
-            yoy_rows.append(yoy_row("GROUP TOTAL", curr_t, prev_t, False))
+            yoy_rows.append(yoy_row("GROUP TOTAL", curr_t, prev_t, False,
+                                     avail_curr_total != avail_prev_total))
 
             yoy_df = pd.DataFrame(yoy_rows)
 
@@ -554,9 +563,11 @@ with tabs[1]:
             yoy_styled = yoy_df.style.map(_yoy_color, subset=[c for c in yoy_df.columns if c != "Property"])
             st.dataframe(yoy_styled, hide_index=True, use_container_width=True)
             st.caption(
-                "Green = up vs same period last year, red = down. Occupancy shown as "
-                "percentage-point (pp) change. 'Not open (LY)' = property wasn't trading "
-                "in the comparison period."
+                "Green = up vs same period last year, red = down. 'Not open (LY)' = "
+                "property wasn't trading in the comparison period. * = room count changed "
+                "between the two periods (e.g. The Queen's Head expanded from 4 to 9 rooms "
+                "on 1 Apr 2026) — Room Nights Sold and Revenue % aren't like-for-like for "
+                "these rows; Occupancy and RevPAR are capacity-adjusted and remain comparable."
             )
 
             # ── Charts ────────────────────────────────────────────────────────

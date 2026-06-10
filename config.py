@@ -26,11 +26,33 @@ PROPERTIES = {
 _QH_EXPANSION = date(2026, 4, 1)
 _QH_OLD_ROOMS = 4
 
+# Ad-hoc room blocks: rooms taken out of saleable inventory for private events etc.
+# Each entry: (property, from_date, to_date, rooms_blocked, reason)
+ROOM_BLOCKS = [
+    ("The Pembroke Arms", date(2026, 5, 22), date(2026, 5, 24), 9, "Jordan's wedding (private event)"),
+]
+
 
 def get_room_count(property_name: str, for_date: date) -> int:
     if property_name == "The Queen's Head" and for_date < _QH_EXPANSION:
-        return _QH_OLD_ROOMS
-    return PROPERTIES[property_name]["rooms"]
+        rooms = _QH_OLD_ROOMS
+    else:
+        rooms = PROPERTIES[property_name]["rooms"]
+    for prop, from_d, to_d, blocked, _ in ROOM_BLOCKS:
+        if prop == property_name and from_d <= for_date <= to_d:
+            rooms -= blocked
+    return max(rooms, 0)
+
+
+def room_block_notes(property_name: str, dates: list) -> list[str]:
+    """Describe any ROOM_BLOCKS entries overlapping the given dates."""
+    notes = []
+    for prop, from_d, to_d, blocked, reason in ROOM_BLOCKS:
+        if prop == property_name and any(from_d <= d <= to_d for d in dates):
+            span = from_d.strftime("%d %b") if from_d == to_d else \
+                f"{from_d.strftime('%d')}-{to_d.strftime('%d %b %Y')}"
+            notes.append(f"{blocked} room{'s' if blocked != 1 else ''} blocked {span} ({reason})")
+    return notes
 
 
 def available_room_nights(property_name: str, from_date: date, to_date: date) -> int:
