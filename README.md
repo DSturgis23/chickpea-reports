@@ -6,11 +6,11 @@ Runs separately from the SevenRooms reservations dashboard on port **8502**.
 ## Running the app
 
 ```
-cd "C:\Users\Delilah Sturgis\chickpea_reports"
+cd "C:\Users\Delilah Sturgis\Documents\Chickpea\chickpea_reports"
 streamlit run dashboard.py --server.port 8502
 ```
 
-Open http://localhost:8502 — password: `chickpea2024`
+Open http://localhost:8502 — password: see `.streamlit/secrets.toml`
 
 To refresh data manually, click **Refresh all data** in the sidebar. Data is otherwise cached for 1 hour.
 

@@ -15,6 +15,7 @@ warnings.filterwarnings("ignore")
 from config import (
     PROPERTIES, get_room_count, BRAND_GREEN, BRAND_LIGHT, APP_PASSWORD,
     is_pre_opening, is_partial_opening, closure_note, partial_closure_note,
+    OPENING_DATES,
 )
 from eviivo import fetch_bookings, fetch_bookings_by_stay
 
@@ -146,6 +147,22 @@ def fmt_var(v, is_pct=False):
 
 def avail_nights_in_range(prop: str, dates: list) -> int:
     return sum(get_room_count(prop, d) for d in dates)
+
+
+def kpi_values(subset_df: pd.DataFrame, dates_list: list, prop: str | None = None) -> dict:
+    """Compute raw RNs/Revenue/ADR/Occupancy/RevPAR for a property (or group total)."""
+    if prop:
+        avail = avail_nights_in_range(prop, dates_list)
+        pdf = subset_df[subset_df["venue_name"] == prop] if "venue_name" in subset_df.columns else subset_df
+    else:
+        avail = sum(avail_nights_in_range(p, dates_list) for p in PROP_NAMES)
+        pdf = subset_df
+    rns = pdf["num_rooms"].sum() if "num_rooms" in pdf.columns else 0
+    rev = pdf["nightly_revenue"].sum() if "nightly_revenue" in pdf.columns else 0
+    adr = rev / rns if rns else 0
+    occ = rns / avail if avail else 0
+    revpar = rev / avail if avail else 0
+    return {"rns": rns, "rev": rev, "adr": adr, "occ": occ, "revpar": revpar}
 
 
 def loading_stay_data(from_d: date, to_d: date) -> pd.DataFrame:
@@ -444,35 +461,24 @@ with tabs[1]:
             def kpi_table(subset_df, dates_list):
                 results = []
                 for prop in PROP_NAMES:
-                    pdf   = subset_df[subset_df["venue_name"] == prop]
-                    avail = avail_nights_in_range(prop, dates_list)
-                    rns   = pdf["num_rooms"].sum()
-                    rev   = pdf["nightly_revenue"].sum()
-                    adr   = rev / rns  if rns  else 0
-                    occ   = rns / avail if avail else 0
-                    revpar = rev / avail if avail else 0
+                    v = kpi_values(subset_df, dates_list, prop)
                     results.append({
                         "Property":        prop,
-                        "Room Nights Sold": int(rns),
-                        "Revenue":         fmt_gbp(rev),
-                        "ADR":             fmt_gbp(adr),
-                        "Occupancy":       f"{occ*100:.1f}%",
-                        "RevPAR":          fmt_gbp(revpar),
+                        "Room Nights Sold": int(v["rns"]),
+                        "Revenue":         fmt_gbp(v["rev"]),
+                        "ADR":             fmt_gbp(v["adr"]),
+                        "Occupancy":       f"{v['occ']*100:.1f}%",
+                        "RevPAR":          fmt_gbp(v["revpar"]),
                     })
                 # Group total
-                avail_total = sum(avail_nights_in_range(p, dates_list) for p in PROP_NAMES)
-                rns_t  = subset_df["num_rooms"].sum()
-                rev_t  = subset_df["nightly_revenue"].sum()
-                adr_t  = rev_t / rns_t  if rns_t  else 0
-                occ_t  = rns_t / avail_total if avail_total else 0
-                rp_t   = rev_t / avail_total if avail_total else 0
+                vt = kpi_values(subset_df, dates_list, None)
                 results.append({
                     "Property":        "GROUP TOTAL",
-                    "Room Nights Sold": int(rns_t),
-                    "Revenue":         fmt_gbp(rev_t),
-                    "ADR":             fmt_gbp(adr_t),
-                    "Occupancy":       f"{occ_t*100:.1f}%",
-                    "RevPAR":          fmt_gbp(rp_t),
+                    "Room Nights Sold": int(vt["rns"]),
+                    "Revenue":         fmt_gbp(vt["rev"]),
+                    "ADR":             fmt_gbp(vt["adr"]),
+                    "Occupancy":       f"{vt['occ']*100:.1f}%",
+                    "RevPAR":          fmt_gbp(vt["revpar"]),
                 })
                 return pd.DataFrame(results)
 
@@ -487,6 +493,71 @@ with tabs[1]:
 
             st.markdown("#### All Days Combined")
             st.dataframe(kpi_table(sdf, all_dates), hide_index=True, use_container_width=True)
+
+            # ── YoY comparison vs same period last year ─────────────────────────
+            wk_from_ly = wk_from - relativedelta(years=1)
+            wk_to_ly   = wk_to   - relativedelta(years=1)
+            all_dates_ly = [wk_from_ly + timedelta(days=i) for i in range((wk_to_ly - wk_from_ly).days + 1)]
+
+            df_wk_ly = loading_stay_data(wk_from_ly, wk_to_ly)
+            sdf_ly = expand_stay_dates(df_wk_ly) if not df_wk_ly.empty else pd.DataFrame()
+            if not sdf_ly.empty:
+                sdf_ly = sdf_ly[(sdf_ly["stay_date"] >= wk_from_ly) & (sdf_ly["stay_date"] <= wk_to_ly)]
+
+            st.markdown(
+                f"#### vs Same Period Last Year "
+                f"({wk_from_ly.strftime('%d %b %Y')} – {wk_to_ly.strftime('%d %b %Y')})"
+            )
+
+            def pct_change(curr, prev):
+                if not prev:
+                    return None
+                return (curr - prev) / prev * 100
+
+            def yoy_row(label, curr, prev, not_open_ly):
+                if not_open_ly:
+                    return {"Property": label, "Room Nights Sold": "Not open (LY)",
+                            "Revenue": "Not open (LY)", "ADR": "Not open (LY)",
+                            "Occupancy": "Not open (LY)", "RevPAR": "Not open (LY)"}
+                row = {"Property": label}
+                for key, col in [("rns", "Room Nights Sold"), ("rev", "Revenue"),
+                                  ("adr", "ADR"), ("revpar", "RevPAR")]:
+                    pc = pct_change(curr[key], prev[key])
+                    row[col] = fmt_pct(pc) if pc is not None else "—"
+                occ_diff = (curr["occ"] - prev["occ"]) * 100
+                sign = "+" if occ_diff > 0 else ""
+                row["Occupancy"] = f"{sign}{occ_diff:.1f}pp"
+                return row
+
+            yoy_rows = []
+            for prop in PROP_NAMES:
+                opening = OPENING_DATES.get(prop)
+                not_open_ly = bool(opening) and all(d < opening for d in all_dates_ly)
+                curr_v = kpi_values(sdf, all_dates, prop)
+                prev_v = kpi_values(sdf_ly, all_dates_ly, prop)
+                yoy_rows.append(yoy_row(prop, curr_v, prev_v, not_open_ly))
+
+            curr_t = kpi_values(sdf, all_dates, None)
+            prev_t = kpi_values(sdf_ly, all_dates_ly, None)
+            yoy_rows.append(yoy_row("GROUP TOTAL", curr_t, prev_t, False))
+
+            yoy_df = pd.DataFrame(yoy_rows)
+
+            def _yoy_color(v):
+                if isinstance(v, str):
+                    if v.startswith("+"):
+                        return "color: #1a7f37; font-weight: 600"
+                    if v.startswith("-"):
+                        return "color: #c0392b; font-weight: 600"
+                return ""
+
+            yoy_styled = yoy_df.style.map(_yoy_color, subset=[c for c in yoy_df.columns if c != "Property"])
+            st.dataframe(yoy_styled, hide_index=True, use_container_width=True)
+            st.caption(
+                "Green = up vs same period last year, red = down. Occupancy shown as "
+                "percentage-point (pp) change. 'Not open (LY)' = property wasn't trading "
+                "in the comparison period."
+            )
 
             # ── Charts ────────────────────────────────────────────────────────
             import plotly.graph_objects as go
