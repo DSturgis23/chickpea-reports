@@ -136,10 +136,13 @@ def _parse_booking(rec: dict, venue_name: str) -> Optional[dict]:
     # OTAs use anonymised email addresses (e.g. @guest.booking.com, @agoda-messaging.com).
     # Real email addresses indicate a direct/phone booking.
     guests = rec.get("Guests", [])
-    primary_email = ""
-    if guests and isinstance(guests, list):
-        primary_email = (guests[0].get("Email") or "").lower()
+    g0 = guests[0] if guests and isinstance(guests, list) else {}
+    primary_email = (g0.get("Email") or "").lower()
     channel = _channel_from_email(primary_email)
+
+    guest_id = g0.get("GuestId")
+    guest_name = f"{(g0.get('FirstName') or '').strip()} {(g0.get('Surname') or '').strip()}".strip() or "Unknown"
+    guest_phone = g0.get("Telephone") or ""
 
     # Rate plan: detected from BookingNote (RatePlanId is always 0 in this API)
     rate_plan = _rate_plan_from_note(b.get("BookingNote") or "")
@@ -168,6 +171,10 @@ def _parse_booking(rec: dict, venue_name: str) -> Optional[dict]:
         "channel":     channel,
         "rate_plan":   rate_plan,
         "room_type":   room_type,
+        "guest_id":    guest_id,
+        "guest_name":  guest_name,
+        "guest_email": primary_email,
+        "guest_phone": guest_phone,
     }
 
 

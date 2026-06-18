@@ -206,6 +206,7 @@ tabs = st.tabs([
     "🔭 Pace Report",
     "📡 Pick-up Report",
     "🪟 Booking Window",
+    "💼 Potential Corporate Guests",
 ])
 
 
@@ -1816,3 +1817,97 @@ Figures are based on check-in date within the selected range.
                     showlegend=False,
                 )
                 st.plotly_chart(fig_mo, use_container_width=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 9 — Potential Corporate Guests
+# ─────────────────────────────────────────────────────────────────────────────
+with tabs[8]:
+    st.subheader("Potential Corporate Guests")
+    with st.expander("ℹ️ How to read this report", expanded=False):
+        st.markdown("""
+**What it shows:** Guests who booked **directly** — via our website, by phone/email to us or
+Kirstie, or in person at one of the pubs (i.e. not via an OTA or a corporate travel agency) — and
+checked in on a **midweek night (Sunday–Thursday)** more than once since 1 Jan 2026.
+
+**Why it matters:** A guest who keeps coming back midweek on a direct booking is often staying
+for work. These are the people worth approaching about our corporate rate.
+
+**How it's built:**
+- Confirmed (non-cancelled) bookings only.
+- "Direct / Phone" channel only — excludes Booking.com, Expedia, and corporate travel agencies.
+- Sunday–Thursday check-ins only.
+- Guests are matched by email address, falling back to phone number, then name, if no email is given.
+- Shown per pub — a guest only appears once they have 2+ qualifying visits at that property.
+        """)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        cg_from = st.date_input("Check-in from", value=date(2026, 1, 1), key="cg_from")
+    with c2:
+        cg_to = st.date_input("Check-in to", value=TODAY, key="cg_to")
+
+    if cg_from > cg_to:
+        st.error("'From' date must be before 'To' date.")
+    else:
+        df_cg = loading_data(cg_from, cg_to)
+
+        if df_cg.empty:
+            st.info("No confirmed bookings in this period.")
+        else:
+            df_cg = df_cg[df_cg["channel"] == "Direct / Phone"].copy()
+            df_cg["checkin_weekday"] = pd.to_datetime(df_cg["checkin"]).dt.weekday
+            df_cg = df_cg[~df_cg["checkin_weekday"].isin([4, 5])]  # drop Fri (4) & Sat (5)
+
+            if df_cg.empty:
+                st.info("No direct, midweek bookings in this period.")
+            else:
+                def guest_key(row):
+                    # Eviivo issues a fresh GuestId on every booking even for the same
+                    # person, so it can't be used to spot repeat guests — match on
+                    # normalised email, then normalised phone, then name instead.
+                    email = (row["guest_email"] or "").strip().lower()
+                    if email:
+                        return f"email:{email}"
+                    phone_digits = "".join(ch for ch in (row["guest_phone"] or "") if ch.isdigit())
+                    if phone_digits:
+                        return f"phone:{phone_digits}"
+                    return f"name:{row['guest_name']}"
+
+                df_cg["guest_key"] = df_cg.apply(guest_key, axis=1)
+
+                any_found = False
+                for prop in PROP_NAMES:
+                    pdf = df_cg[df_cg["venue_name"] == prop]
+                    if pdf.empty:
+                        continue
+
+                    grp = pdf.groupby("guest_key").agg(
+                        Guest=("guest_name", "first"),
+                        Email=("guest_email", "first"),
+                        Phone=("guest_phone", "first"),
+                        Visits=("booking_ref", "count"),
+                        Nights=("nights", "sum"),
+                        Revenue=("revenue", "sum"),
+                        First_Visit=("checkin", "min"),
+                        Last_Visit=("checkin", "max"),
+                    ).reset_index(drop=True)
+
+                    repeat = grp[grp["Visits"] > 1].sort_values("Visits", ascending=False)
+                    if repeat.empty:
+                        continue
+
+                    any_found = True
+                    st.markdown(f"#### {prop}")
+                    disp = repeat.copy()
+                    disp["Revenue"]      = disp["Revenue"].apply(fmt_gbp)
+                    disp["First_Visit"]  = pd.to_datetime(disp["First_Visit"]).dt.strftime("%d %b %Y")
+                    disp["Last_Visit"]   = pd.to_datetime(disp["Last_Visit"]).dt.strftime("%d %b %Y")
+                    disp.columns = [
+                        "Guest", "Email", "Phone", "Midweek Direct Visits",
+                        "Total Nights", "Total Revenue", "First Visit", "Last Visit",
+                    ]
+                    st.dataframe(disp, hide_index=True, use_container_width=True)
+
+                if not any_found:
+                    st.info("No guests with repeat midweek direct bookings found in this period.")
