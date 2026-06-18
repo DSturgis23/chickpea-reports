@@ -1677,6 +1677,50 @@ Figures are based on check-in date within the selected range.
 
             st.divider()
 
+            # ── Lead time bucket by property ─────────────────────────────────
+            st.markdown("#### Lead Time Bucket by Property")
+
+            bkt_prop_counts = (
+                df_bw.groupby(["venue_name", "bucket"])["booking_ref"]
+                .count()
+                .unstack("bucket")
+                .reindex(columns=BUCKET_ORDER)
+                .reindex(PROP_NAMES)
+                .dropna(how="all")
+                .fillna(0)
+            )
+            bkt_prop_pct = bkt_prop_counts.div(bkt_prop_counts.sum(axis=1), axis=0) * 100
+
+            disp_bkt_prop = bkt_prop_counts.astype(int).reset_index()
+            disp_bkt_prop = disp_bkt_prop.rename(columns={"venue_name": "Property"})
+            st.dataframe(disp_bkt_prop, hide_index=True, use_container_width=True)
+
+            bkt_prop_chart = bkt_prop_pct
+            short_prop_names = [p.replace("The ", "") for p in bkt_prop_chart.index]
+            green_palette = ["#1b4332", "#2d6a4f", "#40916c", "#52b788", "#95d5b2", "#d8f3dc"]
+
+            fig_bkt_prop = go.Figure()
+            for bucket, color in zip(BUCKET_ORDER, green_palette):
+                if bucket in bkt_prop_chart.columns:
+                    fig_bkt_prop.add_trace(go.Bar(
+                        name=bucket,
+                        y=short_prop_names,
+                        x=bkt_prop_chart[bucket],
+                        orientation="h",
+                        marker_color=color,
+                    ))
+            fig_bkt_prop.update_layout(
+                barmode="stack",
+                title="Lead Time Bucket Mix by Property (% of bookings)",
+                xaxis_title="% of Bookings",
+                margin=dict(t=50, b=20, l=130, r=20),
+                height=max(280, len(bkt_prop_chart) * 52),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_bkt_prop, use_container_width=True)
+
+            st.divider()
+
             # ── By property ───────────────────────────────────────────────────
             st.markdown("#### By Property")
 
