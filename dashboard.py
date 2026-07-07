@@ -19,6 +19,14 @@ from config import (
 )
 from eviivo import fetch_bookings, fetch_bookings_by_stay
 
+import io
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib import colors as rl_colors
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak, Image
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+import plotly.graph_objects as go
+
 st.set_page_config(
     page_title="Chickpea — Performance Reports",
     page_icon="🏨",
@@ -194,6 +202,617 @@ def loading_data(from_d: date, to_d: date) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+# ── Month-End Report helpers ────────────────────────────────────────────────────
+
+def _mer_month_options() -> list:
+    """Last 25 month-starts, most recent (current, in-progress) month first."""
+    cur = date(TODAY.year, TODAY.month, 1)
+    return [cur - relativedelta(months=i) for i in range(25)]
+
+
+def _mer_month_label(m: date) -> str:
+    lbl = m.strftime("%B %Y")
+    if m.year == TODAY.year and m.month == TODAY.month:
+        lbl += "  ⚠️ (in progress)"
+    return lbl
+
+
+def _mer_bounds(m_start: date) -> tuple:
+    return m_start, (m_start + relativedelta(months=1)) - timedelta(days=1)
+
+
+def _mer_lead_bucket(days) -> str:
+    if pd.isna(days):
+        return "Unknown"
+    if days <= 0:
+        return "Same day"
+    if days <= 7:
+        return "1–7 days"
+    if days <= 14:
+        return "8–14 days"
+    if days <= 30:
+        return "15–30 days"
+    return "31+ days"
+
+
+def _mer_group_kpi(sdf: pd.DataFrame, dates_list: list, props: list) -> dict:
+    """Like kpi_values(), but for an arbitrary subset of properties (like-for-like total)."""
+    avail = sum(avail_nights_in_range(p, dates_list) for p in props)
+    if "venue_name" in sdf.columns:
+        pdf = sdf[sdf["venue_name"].isin(props)]
+    else:
+        pdf = sdf
+    rns = pdf["num_rooms"].sum() if "num_rooms" in pdf.columns else 0
+    rev = pdf["nightly_revenue"].sum() if "nightly_revenue" in pdf.columns else 0
+    return {
+        "rns": rns, "rev": rev,
+        "adr": rev / rns if rns else 0,
+        "occ": rns / avail if avail else 0,
+        "revpar": rev / avail if avail else 0,
+    }
+
+
+def _mer_signal(var_pct) -> str:
+    """Same thresholds as the Pace Report's _pace_signal (dashboard.py ~1454)."""
+    if var_pct is None:
+        return "—"
+    if var_pct >= 15:
+        return "🟢 Strong"
+    if var_pct >= 0:
+        return "🟡 Ahead"
+    if var_pct >= -15:
+        return "🟠 Behind"
+    return "🔴 Weak"
+
+
+def _mer_daytype_split(cy_sdf: pd.DataFrame, ly_sdf: pd.DataFrame, cy_dates: list, ly_dates: list) -> pd.DataFrame:
+    """Group-total Occ%/RevPAR split by Weekday/Weekend/Sunday (reuses day_type(), same idea as the
+    Weekly/MTD tab's 3-way split, but at group level to keep this section compact)."""
+    rows = []
+    for dtype in ["Weekday (Mon–Thu)", "Weekend (Fri–Sat)", "Sunday"]:
+        cy_days = [d for d in cy_dates if day_type(d) == dtype]
+        ly_days = [d for d in ly_dates if day_type(d) == dtype]
+        cy_sub = cy_sdf[cy_sdf["stay_date"].apply(day_type) == dtype] if not cy_sdf.empty else cy_sdf
+        ly_sub = ly_sdf[ly_sdf["stay_date"].apply(day_type) == dtype] if not ly_sdf.empty else ly_sdf
+        cy_v = kpi_values(cy_sub, cy_days, None) if cy_days else None
+        ly_v = kpi_values(ly_sub, ly_days, None) if ly_days else None
+        rows.append({
+            "Day Type": dtype,
+            "Occ % (CY)": f"{cy_v['occ']*100:.1f}%" if cy_v else "—",
+            "RevPAR (CY)": fmt_gbp(cy_v["revpar"]) if cy_v else "—",
+            "Occ % (LY)": f"{ly_v['occ']*100:.1f}%" if ly_v else "—",
+            "RevPAR (LY)": fmt_gbp(ly_v["revpar"]) if ly_v else "—",
+        })
+    return pd.DataFrame(rows)
+
+
+def _mer_trailing_trend(cy_start: date, months: int = 6) -> pd.DataFrame:
+    """Group-total Occ%/RevPAR for the trailing `months` (CY line) and their LY equivalents.
+    Reuses loading_stay_data/kpi_values — the current month's call hits the same cache key
+    already warmed by the main KPI section above, so this only adds (months-1) new fetches."""
+    rows = []
+    for i in range(months - 1, -1, -1):
+        m_start = cy_start - relativedelta(months=i)
+        m_end = (m_start + relativedelta(months=1)) - timedelta(days=1)
+        ly_m_start = m_start - relativedelta(years=1)
+        ly_m_end = m_end - relativedelta(years=1)
+        m_dates = [m_start + timedelta(days=d) for d in range((m_end - m_start).days + 1)]
+        ly_m_dates = [ly_m_start + timedelta(days=d) for d in range((ly_m_end - ly_m_start).days + 1)]
+
+        cy_sdf_i = expand_stay_dates(loading_stay_data(m_start, m_end))
+        ly_sdf_i = expand_stay_dates(loading_stay_data(ly_m_start, ly_m_end))
+        if not cy_sdf_i.empty:
+            cy_sdf_i = cy_sdf_i[(cy_sdf_i["stay_date"] >= m_start) & (cy_sdf_i["stay_date"] <= m_end)]
+        if not ly_sdf_i.empty:
+            ly_sdf_i = ly_sdf_i[(ly_sdf_i["stay_date"] >= ly_m_start) & (ly_sdf_i["stay_date"] <= ly_m_end)]
+
+        cy_v = kpi_values(cy_sdf_i, m_dates, None)
+        ly_v = kpi_values(ly_sdf_i, ly_m_dates, None)
+        rows.append({
+            "month": m_start.strftime("%b %Y"),
+            "cy_occ": cy_v["occ"] * 100, "ly_occ": ly_v["occ"] * 100,
+            "cy_revpar": cy_v["revpar"], "ly_revpar": ly_v["revpar"],
+        })
+    return pd.DataFrame(rows)
+
+
+def _mer_narrative(kpi_rows, lt_cy, lt_ly, cancel_cy, cancel_ly, cy_start, ly_start) -> str:
+    """Templated (not LLM-generated) 3-4 sentence summary off numbers already computed above."""
+    prop_rows = [r for r in kpi_rows if r["cy"] and r["ly"] and not r["property"].startswith("GROUP TOTAL")]
+    lfl_row = next((r for r in kpi_rows if r["property"].startswith("GROUP TOTAL (like-for-like")), None)
+
+    sentences = []
+    if lfl_row and lfl_row["cy"] and lfl_row["ly"] and lfl_row["ly"]["rev"]:
+        grp_yoy = (lfl_row["cy"]["rev"] - lfl_row["ly"]["rev"]) / lfl_row["ly"]["rev"] * 100
+        direction = "up" if grp_yoy >= 0 else "down"
+        sentences.append(
+            f"Group like-for-like revenue is {direction} {abs(grp_yoy):.1f}% vs "
+            f"{ly_start:%B %Y}."
+        )
+
+    # Rank on RevPAR YoY, not raw Revenue YoY — Revenue/RNs scale mechanically with room
+    # count, which would make a property that gained rooms (e.g. Queen's Head 4→9) look
+    # like the "best performer" for capacity reasons alone. RevPAR is already normalized
+    # per available room-night via get_room_count(), so it isolates real trading performance.
+    # Properties with a room-count change vs LY are excluded from ranking entirely and
+    # called out separately, since even RevPAR can be transitionally noisy right after
+    # a room-count change (e.g. new rooms still ramping up to full occupancy).
+    room_changed_props = [r["property"] for r in prop_rows if r.get("room_changed")]
+    ranked_rows = [r for r in prop_rows if not r.get("room_changed")]
+
+    yoys = []
+    for r in ranked_rows:
+        if r["ly"]["revpar"]:
+            yoys.append((r["property"], (r["cy"]["revpar"] - r["ly"]["revpar"]) / r["ly"]["revpar"] * 100))
+    if yoys:
+        yoys.sort(key=lambda x: x[1], reverse=True)
+        best = yoys[0]
+        worst = yoys[-1]
+        if best[1] != worst[1]:
+            sentences.append(
+                f"On RevPAR, {best[0]} has the strongest growth ({'+' if best[1] >= 0 else ''}{best[1]:.1f}%), "
+                f"while {worst[0]} is trading furthest behind last year "
+                f"({'+' if worst[1] >= 0 else ''}{worst[1]:.1f}%)."
+            )
+    if room_changed_props:
+        plural = len(room_changed_props) > 1
+        sentences.append(
+            f"{', '.join(room_changed_props)} {'have' if plural else 'has'} a different room count than "
+            f"{ly_start:%B %Y}, so {'they are' if plural else 'it is'} excluded from the comparison above — "
+            f"Revenue/RNs growth for {'them' if plural else 'it'} reflects added capacity, not just trading performance."
+        )
+
+    if lt_cy["avg"] is not None and lt_ly["avg"] is not None:
+        delta = lt_cy["avg"] - lt_ly["avg"]
+        trend = "shortened" if delta < 0 else "lengthened"
+        sentences.append(
+            f"Average booking lead time has {trend} by {abs(delta):.1f} days compared with "
+            f"{ly_start:%B %Y}."
+        )
+
+    if cancel_cy["n"] or cancel_ly["n"]:
+        cancel_delta = cancel_cy["n"] - cancel_ly["n"]
+        cancel_dir = "up" if cancel_delta > 0 else ("down" if cancel_delta < 0 else "unchanged")
+        sentences.append(
+            f"Cancellations are {cancel_dir} {abs(cancel_delta)} bookings on the same point last year "
+            f"({cancel_cy['n']} vs {cancel_ly['n']})."
+        )
+
+    if not sentences:
+        return "Not enough comparable data to generate a summary for this month."
+    return " ".join(sentences)
+
+
+def _mer_chart_png(fig, scale: float = 2.0) -> bytes:
+    """Bridge: rasterize an existing Plotly figure to PNG bytes via kaleido, for PDF embedding."""
+    return fig.to_image(format="png", scale=scale)
+
+
+def _mer_kpi_rows(cy_sdf, ly_sdf, cy_dates, ly_dates, cy_ym, ly_ym) -> list:
+    """Per-property + group-total + like-for-like-total KPI rows with YoY.
+
+    Skips kpi_values() for any property/side that was pre-opening or fully closed —
+    config.get_room_count() doesn't know about OPENING_DATES/KNOWN_CLOSURES, so trusting
+    it there would silently report near-zero occupancy instead of "not open".
+    """
+    rows, lfl_props = [], []
+    for prop in PROP_NAMES:
+        cy_blocked = is_pre_opening(prop, *cy_ym) or closure_note(prop, *cy_ym)
+        ly_blocked = is_pre_opening(prop, *ly_ym) or closure_note(prop, *ly_ym)
+        cy_v = None if cy_blocked else kpi_values(cy_sdf, cy_dates, prop)
+        ly_v = None if ly_blocked else kpi_values(ly_sdf, ly_dates, prop)
+        if not cy_blocked and not ly_blocked:
+            lfl_props.append(prop)
+
+        note_parts = []
+        for n in (closure_note(prop, *cy_ym), closure_note(prop, *ly_ym),
+                  partial_closure_note(prop, *cy_ym), partial_closure_note(prop, *ly_ym)):
+            if n and n not in note_parts:
+                note_parts.append(n)
+
+        # Room-count changes (e.g. Queen's Head 4→9 rooms) inflate raw Revenue/RNs YoY
+        # mechanically — Occ%/RevPAR are already room-count-normalized via get_room_count(),
+        # but flag it explicitly so Revenue/RNs aren't misread as like-for-like performance.
+        room_changed = get_room_count(prop, cy_dates[0]) != get_room_count(prop, ly_dates[0])
+        if room_changed:
+            cy_rooms, ly_rooms = get_room_count(prop, cy_dates[0]), get_room_count(prop, ly_dates[0])
+            note_parts.append(
+                f"Room count changed ({ly_rooms}→{cy_rooms} rooms) — Revenue/RNs/YoY Rev% "
+                f"not like-for-like; Occ%/RevPAR already account for this"
+            )
+
+        rows.append({
+            "property": prop, "cy": cy_v, "ly": ly_v, "note": "; ".join(note_parts),
+            "room_changed": room_changed,
+        })
+
+    rows.append({
+        "property": "GROUP TOTAL (all trading properties)",
+        "cy": kpi_values(cy_sdf, cy_dates, None),
+        "ly": kpi_values(ly_sdf, ly_dates, None),
+        "note": "Includes newly-opened properties",
+        "room_changed": False,
+    })
+    if lfl_props:
+        rows.append({
+            "property": f"GROUP TOTAL (like-for-like, {len(lfl_props)} properties)",
+            "cy": _mer_group_kpi(cy_sdf, cy_dates, lfl_props),
+            "ly": _mer_group_kpi(ly_sdf, ly_dates, lfl_props),
+            "note": "",
+            "room_changed": False,
+        })
+    return rows
+
+
+def _mer_kpi_table_rows(kpi_rows: list) -> list:
+    """Formatted [Property, RNs, Revenue, ADR, Occ%, RevPAR, YoY Rev%, YoY Occ, Signal, Note] rows."""
+    out = []
+    for r in kpi_rows:
+        cy, ly, note = r["cy"], r["ly"], r["note"]
+        notes = []
+        if cy is None:
+            notes.append("Not open this month")
+        if ly is None and cy is not None:
+            notes.append("No LY data — not open last year")
+        if note:
+            notes.append(note)
+
+        rev_yoy = occ_yoy_pp = None
+        if cy and ly and ly["rev"]:
+            rev_yoy = (cy["rev"] - ly["rev"]) / ly["rev"] * 100
+        if cy and ly and cy["occ"] is not None and ly["occ"] is not None:
+            occ_yoy_pp = (cy["occ"] - ly["occ"]) * 100
+
+        out.append([
+            r["property"],
+            f"{cy['rns']:.0f}" if cy else "N/A",
+            fmt_gbp(cy["rev"]) if cy else "N/A",
+            fmt_gbp(cy["adr"]) if cy else "N/A",
+            f"{cy['occ']*100:.1f}%" if cy else "N/A",
+            fmt_gbp(cy["revpar"]) if cy else "N/A",
+            fmt_pct(rev_yoy) if rev_yoy is not None else "N/A",
+            (f"{'+' if occ_yoy_pp >= 0 else ''}{occ_yoy_pp:.1f}pp" if occ_yoy_pp is not None else "N/A"),
+            _mer_signal(rev_yoy),
+            "; ".join(notes),
+        ])
+    return out
+
+
+def _mer_source_mix(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["channel", "Bookings", "Room_Nights", "Revenue", "ADR", "Rev %"])
+    ch = df.groupby("channel").agg(
+        Bookings=("booking_ref", "count"),
+        Room_Nights=("nights", "sum"),
+        Revenue=("revenue", "sum"),
+    ).reset_index()
+    ch["ADR"] = ch["Revenue"] / ch["Room_Nights"].replace(0, np.nan)
+    total_rev = ch["Revenue"].sum()
+    ch["Rev %"] = (ch["Revenue"] / total_rev * 100) if total_rev else 0
+    return ch.sort_values("Revenue", ascending=False)
+
+
+def _mer_leadtime_stats(df: pd.DataFrame) -> dict:
+    empty = {"avg": None, "median": None, "pct_7": None, "pct_14": None, "pct_30": None, "n": 0}
+    if df.empty:
+        return empty
+    d = df.copy()
+    d["lead_time"] = (pd.to_datetime(d["checkin"]) - pd.to_datetime(d["created"])).dt.days
+    d = d[d["lead_time"].notna() & (d["lead_time"] >= 0)]
+    if d.empty:
+        return empty
+    return {
+        "avg": d["lead_time"].mean(),
+        "median": d["lead_time"].median(),
+        "pct_7": (d["lead_time"] <= 7).mean() * 100,
+        "pct_14": (d["lead_time"] <= 14).mean() * 100,
+        "pct_30": (d["lead_time"] <= 30).mean() * 100,
+        "n": len(d),
+    }
+
+
+def _mer_leadtime_buckets(df: pd.DataFrame) -> pd.DataFrame:
+    order = ["Same day", "1–7 days", "8–14 days", "15–30 days", "31+ days"]
+    if df.empty:
+        return pd.DataFrame({"Lead Time": order, "Bookings": [0] * len(order)})
+    d = df.copy()
+    d["lead_time"] = (pd.to_datetime(d["checkin"]) - pd.to_datetime(d["created"])).dt.days
+    d = d[d["lead_time"].notna() & (d["lead_time"] >= 0)]
+    if d.empty:
+        return pd.DataFrame({"Lead Time": order, "Bookings": [0] * len(order)})
+    d["bucket"] = d["lead_time"].apply(_mer_lead_bucket)
+    out = d.groupby("bucket").size().reindex(order, fill_value=0).reset_index()
+    out.columns = ["Lead Time", "Bookings"]
+    return out
+
+
+def _mer_cancellation_stats(raw_df: pd.DataFrame) -> dict:
+    empty_breakdown = pd.DataFrame(columns=["group", "Bookings", "Revenue"])
+    if raw_df.empty or "cancelled" not in raw_df.columns:
+        return {"n": 0, "rns": 0, "rev": 0.0, "pct": None, "total": 0,
+                "by_channel": empty_breakdown, "by_property": empty_breakdown}
+    cx = raw_df[raw_df["cancelled"]]
+    total = len(raw_df)
+    by_channel = (
+        cx.groupby("channel").agg(Bookings=("booking_ref", "count"), Revenue=("revenue", "sum"))
+        .reset_index().rename(columns={"channel": "group"}).sort_values("Revenue", ascending=False)
+        if not cx.empty else empty_breakdown
+    )
+    by_property = (
+        cx.groupby("venue_name").agg(Bookings=("booking_ref", "count"), Revenue=("revenue", "sum"))
+        .reset_index().rename(columns={"venue_name": "group"}).sort_values("Revenue", ascending=False)
+        if not cx.empty else empty_breakdown
+    )
+    return {
+        "n": len(cx),
+        "rns": int(cx["nights"].sum()),
+        "rev": float(cx["revenue"].sum()),
+        "pct": (len(cx) / total * 100) if total else None,
+        "total": total,
+        "by_channel": by_channel,
+        "by_property": by_property,
+    }
+
+
+def _mer_blocked_stats(blk_df: pd.DataFrame, month_start: date, month_end: date) -> dict:
+    if blk_df.empty:
+        return {"available": False, "n": 0, "rns": 0}
+    covers = blk_df["from_date"].min() <= month_start
+    active = blk_df[blk_df["deleted_on"] == ""]
+    in_range = active[
+        (active["from_date"] <= month_end) & (active["to_date"] > month_start)
+    ].copy()
+    in_range["nights"] = (
+        pd.to_datetime(in_range["to_date"]) - pd.to_datetime(in_range["from_date"])
+    ).dt.days
+    return {"available": covers, "n": len(in_range), "rns": int(in_range["nights"].sum())}
+
+
+# ── Month-End Report notes (persisted to GitHub, same pattern as the Pick-up Report's
+# rate-change log — Streamlit Cloud's local filesystem doesn't survive restarts/redeploys,
+# so anything a user types in needs to round-trip through the repo instead of a local file) ──
+_MER_NOTES_COLS   = ["month", "notes", "updated_at"]
+_MER_NOTES_GHPATH = "data/month_end_notes.csv"
+
+
+def _load_mer_notes() -> pd.DataFrame:
+    import base64, requests as _req
+    try:
+        resp = _req.get(
+            f"https://api.github.com/repos/{_RATE_LOG_REPO}/contents/{_MER_NOTES_GHPATH}",
+            headers=_gh_headers(), timeout=15,
+        )
+        if resp.status_code == 200:
+            content = base64.b64decode(resp.json()["content"]).decode()
+            from io import StringIO
+            return pd.read_csv(StringIO(content), dtype=str).fillna("")
+    except Exception:
+        pass
+    return pd.DataFrame(columns=_MER_NOTES_COLS)
+
+
+def _save_mer_notes(df: pd.DataFrame):
+    import base64, requests as _req
+    content = df.to_csv(index=False)
+    encoded = base64.b64encode(content.encode()).decode()
+    url = f"https://api.github.com/repos/{_RATE_LOG_REPO}/contents/{_MER_NOTES_GHPATH}"
+    get_resp = _req.get(url, headers=_gh_headers(), timeout=15)
+    payload = {"message": "Update month-end report notes", "content": encoded}
+    if get_resp.status_code == 200:
+        payload["sha"] = get_resp.json()["sha"]
+    put_resp = _req.put(url, headers=_gh_headers(), json=payload, timeout=15)
+    if put_resp.status_code not in (200, 201):
+        st.error(f"Could not save notes to GitHub ({put_resp.status_code}). Check github_token in secrets.")
+        return False
+    return True
+
+
+def _mer_get_note(notes_df: pd.DataFrame, month_key: str) -> str:
+    if notes_df.empty:
+        return ""
+    match = notes_df[notes_df["month"] == month_key]
+    return match.iloc[-1]["notes"] if not match.empty else ""
+
+
+def _mer_set_note(notes_df: pd.DataFrame, month_key: str, text: str) -> pd.DataFrame:
+    df = notes_df[notes_df["month"] != month_key].copy() if not notes_df.empty else pd.DataFrame(columns=_MER_NOTES_COLS)
+    new_row = pd.DataFrame([{
+        "month": month_key, "notes": text,
+        "updated_at": date.today().strftime("%Y-%m-%d"),
+    }])
+    return pd.concat([df, new_row], ignore_index=True)
+
+
+def _mer_build_pdf(
+    cy_start, ly_start, is_partial, narrative, notes_text,
+    kpi_pdf_rows, daytype_rows,
+    source_cy, source_ly,
+    lt_cy, lt_ly, cancel_cy, cancel_ly, block_cy, block_ly,
+    chart_pngs: dict,
+) -> bytes:
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("MERTitle", parent=styles["Title"], textColor=rl_colors.HexColor(BRAND_GREEN))
+    h2 = ParagraphStyle("MERH2", parent=styles["Heading2"], textColor=rl_colors.HexColor(BRAND_GREEN), spaceBefore=14)
+    note_style = ParagraphStyle("MERNote", parent=styles["BodyText"], fontSize=8, textColor=rl_colors.grey, spaceAfter=6)
+    narrative_style = ParagraphStyle("MERNarrative", parent=styles["BodyText"], fontSize=9.5, spaceAfter=6)
+
+    def table(header, rows, widths=None):
+        t = Table([header] + rows, colWidths=widths, repeatRows=1)
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor(BRAND_GREEN)),
+            ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor(BRAND_LIGHT)]),
+            ("GRID", (0, 0), (-1, -1), 0.4, rl_colors.HexColor("#999999")),
+            ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        return t
+
+    def chart_image(key, width=170 * mm, height=85 * mm):
+        png = chart_pngs.get(key)
+        if not png:
+            return None
+        return Image(io.BytesIO(png), width=width, height=height)
+
+    story = [
+        Paragraph("Chickpea — Month-End Performance Report", title_style),
+        Paragraph(f"{cy_start:%B %Y} vs {ly_start:%B %Y}", styles["Normal"]),
+    ]
+    if is_partial:
+        story.append(Paragraph(
+            "⚠ PARTIAL MONTH — this report was run before month-end; figures will change.",
+            ParagraphStyle("MERWarn", parent=note_style, textColor=rl_colors.HexColor("#CC2200"))))
+    story.append(Paragraph(f"Generated {date.today():%d %b %Y}", note_style))
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph(narrative, narrative_style))
+    story.append(Spacer(1, 4 * mm))
+
+    if notes_text and notes_text.strip():
+        story.append(Paragraph("Observations", h2))
+        for para in notes_text.strip().split("\n"):
+            if para.strip():
+                story.append(Paragraph(para, narrative_style))
+        story.append(Spacer(1, 4 * mm))
+
+    story.append(Paragraph("Headline KPIs", h2))
+    cell_style = ParagraphStyle("MERCell", fontName="Helvetica", fontSize=7.5, leading=9)
+    kpi_col_widths = [w * mm for w in (34, 11, 16, 12, 12, 14, 14, 14, 16, 27)]
+    kpi_rows_wrapped = [
+        [Paragraph(str(row[0]), cell_style), *row[1:-1], Paragraph(str(row[-1]), cell_style)]
+        for row in kpi_pdf_rows
+    ]
+    story.append(table(
+        ["Property", "RNs", "Revenue", "ADR", "Occ%", "RevPAR", "YoY Rev%", "YoY Occ", "Signal", "Note"],
+        kpi_rows_wrapped,
+        widths=kpi_col_widths,
+    ))
+    story.append(Paragraph(
+        "Like-for-like total excludes properties not open in both the current and prior-year month.",
+        note_style))
+
+    if daytype_rows:
+        story.append(Paragraph("Weekday / Weekend / Sunday Split (group total)", h2))
+        story.append(table(
+            ["Day Type", "Occ % (CY)", "RevPAR (CY)", "Occ % (LY)", "RevPAR (LY)"],
+            daytype_rows,
+        ))
+
+    trend_occ_img = chart_image("trend_occ", height=70 * mm)
+    trend_revpar_img = chart_image("trend_revpar", height=70 * mm)
+    if trend_occ_img or trend_revpar_img:
+        story.append(Paragraph("6-Month Trend — Occupancy & RevPAR", h2))
+        if trend_occ_img:
+            story.append(trend_occ_img)
+        if trend_revpar_img:
+            story.append(Spacer(1, 3 * mm))
+            story.append(trend_revpar_img)
+
+    story.append(PageBreak())
+
+    def source_table_rows(sdf):
+        rows = []
+        for _, r in sdf.iterrows():
+            rows.append([r["channel"], f"{int(r['Bookings'])}", f"{int(r['Room_Nights'])}",
+                         fmt_gbp(r["Revenue"]), fmt_gbp(r["ADR"]) if not pd.isna(r["ADR"]) else "—",
+                         f"{r['Rev %']:.1f}%"])
+        return rows
+
+    story.append(Paragraph(f"Booking Source Mix — {cy_start:%B %Y}", h2))
+    story.append(table(["Channel", "Bookings", "Room Nights", "Revenue", "ADR", "Rev %"],
+                        source_table_rows(source_cy)))
+    cy_pie = chart_image("source_pie_cy", width=85 * mm, height=70 * mm)
+    ly_pie = chart_image("source_pie_ly", width=85 * mm, height=70 * mm)
+    if cy_pie or ly_pie:
+        story.append(Table([[cy_pie or "", ly_pie or ""]], colWidths=[85 * mm, 85 * mm]))
+    story.append(Paragraph(f"Booking Source Mix — {ly_start:%B %Y} (LY)", h2))
+    story.append(table(["Channel", "Bookings", "Room Nights", "Revenue", "ADR", "Rev %"],
+                        source_table_rows(source_ly)))
+    story.append(Paragraph(
+        "Source mix is based on check-in date, unlike the stay-date-based KPIs above — "
+        "the two sections will not reconcile exactly for stays spanning month-end.", note_style))
+
+    lt_header = ["Metric", f"{cy_start:%b %Y}", f"{ly_start:%b %Y} (LY)"]
+    def fmt_lt(v, pct=False):
+        if v is None:
+            return "N/A"
+        return f"{v:.1f}%" if pct else f"{v:.1f} days"
+    lt_rows = [
+        ["Avg lead time", fmt_lt(lt_cy["avg"]), fmt_lt(lt_ly["avg"])],
+        ["Median lead time", fmt_lt(lt_cy["median"]), fmt_lt(lt_ly["median"])],
+        ["Booked within 7 days", fmt_lt(lt_cy["pct_7"], True), fmt_lt(lt_ly["pct_7"], True)],
+        ["Booked within 14 days", fmt_lt(lt_cy["pct_14"], True), fmt_lt(lt_ly["pct_14"], True)],
+        ["Booked within 30 days", fmt_lt(lt_cy["pct_30"], True), fmt_lt(lt_ly["pct_30"], True)],
+    ]
+    story.append(Paragraph("Booking Lead Time / Pace", h2))
+    story.append(table(lt_header, lt_rows))
+    lt_chart = chart_image("leadtime")
+    if lt_chart:
+        story.append(Spacer(1, 3 * mm))
+        story.append(lt_chart)
+
+    story.append(PageBreak())
+
+    story.append(Paragraph("Cancellations", h2))
+    def fmt_cancel_row(label, c):
+        return [label, str(c["n"]), str(c["rns"]), fmt_gbp(c["rev"]),
+                f"{c['pct']:.1f}%" if c["pct"] is not None else "N/A"]
+    story.append(table(
+        ["Period", "Cancelled Bookings", "Room-Nights Lost", "Revenue Lost", "% of Bookings"],
+        [fmt_cancel_row(f"{cy_start:%b %Y}", cancel_cy), fmt_cancel_row(f"{ly_start:%b %Y} (LY)", cancel_ly)],
+    ))
+    if not cancel_cy["by_channel"].empty:
+        story.append(Paragraph(f"Cancellations by Channel — {cy_start:%B %Y}", h2))
+        story.append(table(
+            ["Channel", "Bookings", "Revenue"],
+            [[r["group"], str(int(r["Bookings"])), fmt_gbp(r["Revenue"])]
+             for _, r in cancel_cy["by_channel"].iterrows()],
+        ))
+    if not cancel_cy["by_property"].empty:
+        story.append(Paragraph(f"Cancellations by Property — {cy_start:%B %Y}", h2))
+        story.append(table(
+            ["Property", "Bookings", "Revenue"],
+            [[r["group"], str(int(r["Bookings"])), fmt_gbp(r["Revenue"])]
+             for _, r in cancel_cy["by_property"].iterrows()],
+        ))
+    story.append(Paragraph(
+        "Reflects bookings for check-ins in this month currently marked cancelled as of today — "
+        "Eviivo does not expose a cancellation date, so this cannot show cancellations that "
+        "occurred during the month itself, and may differ from a report run on a different day.",
+        note_style))
+
+    story.append(Paragraph("Blocked Rooms", h2))
+    def block_row(label, b):
+        if not b["available"]:
+            return [label, "No data available", "—"]
+        return [label, str(b["n"]), str(b["rns"])]
+    story.append(table(
+        ["Period", "Blocks", "Room-Nights Blocked"],
+        [block_row(f"{cy_start:%b %Y}", block_cy), block_row(f"{ly_start:%b %Y} (LY)", block_ly)],
+    ))
+
+    def footer(canvas, doc):
+        canvas.saveState()
+        canvas.setStrokeColor(rl_colors.HexColor(BRAND_GREEN))
+        canvas.line(16 * mm, 14 * mm, A4[0] - 16 * mm, 14 * mm)
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(rl_colors.grey)
+        canvas.drawString(16 * mm, 9 * mm, "Chickpea — Confidential")
+        canvas.drawRightString(A4[0] - 16 * mm, 9 * mm, f"Page {doc.page}")
+        canvas.restoreState()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4, topMargin=18 * mm, bottomMargin=20 * mm,
+        leftMargin=16 * mm, rightMargin=16 * mm,
+        title=f"Month-End Report {cy_start:%B %Y}",
+    )
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    return buf.getvalue()
+
+
 # ════════════════════════════════════════════════════════════════════════════════
 # TABS
 # ════════════════════════════════════════════════════════════════════════════════
@@ -207,6 +826,7 @@ tabs = st.tabs([
     "📡 Pick-up Report",
     "🪟 Booking Window",
     "💼 Potential Corporate Guests",
+    "📋 Month-End Report",
 ])
 
 
@@ -1911,3 +2531,355 @@ for work. These are the people worth approaching about our corporate rate.
 
                 if not any_found:
                     st.info("No guests with repeat midweek direct bookings found in this period.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 10 — Month-End Report
+# ─────────────────────────────────────────────────────────────────────────────
+with tabs[9]:
+    st.subheader("Month-End Report")
+    with st.expander("ℹ️ How to read this report", expanded=False):
+        st.markdown("""
+**What it shows:** A single month's headline KPIs (room revenue, RevPAR, ADR, occupancy),
+booking source mix, booking lead time, cancellations, and blocked rooms — each compared
+against the same month last year.
+
+**Occupancy/RevPAR/ADR** are calculated on a **stay-date** basis (same method as the
+Weekly/MTD tab), so a booking spanning month-end only counts the nights that actually
+fall in the selected month. **Source mix and lead time** are calculated on a **check-in
+date** basis (same as the Source Report and Pace Report tabs) — the two sections won't
+reconcile to the same totals for stays spanning a month boundary; that's expected.
+
+**Properties not yet open** in the current or prior-year month (e.g. Fleur de Lys before
+Sep 2025) show "N/A" for that side and are excluded from the like-for-like group total,
+but included in the full group total.
+
+**Cancellations** reflect bookings currently marked cancelled as of today — Eviivo
+doesn't expose a cancellation date, so this can't show cancellations that happened
+during the month itself.
+
+**Blocked rooms** come from the manually-uploaded CSV on the Blocked Rooms tab — if that
+export doesn't go back far enough to cover the prior-year month, this will say so rather
+than showing a misleading zero.
+        """)
+
+    month_opts = _mer_month_options()
+    sel_month = st.selectbox(
+        "Report month", month_opts, index=1,
+        format_func=_mer_month_label, key="mer_month",
+    )
+
+    cy_start, cy_end = _mer_bounds(sel_month)
+    ly_start, ly_end = cy_start - relativedelta(years=1), cy_end - relativedelta(years=1)
+    cy_ym = (cy_start.year, cy_start.month)
+    ly_ym = (ly_start.year, ly_start.month)
+    is_partial = cy_end >= TODAY
+
+    if is_partial:
+        st.warning(
+            f"⚠️ {sel_month.strftime('%B %Y')} is not yet complete — figures below are "
+            "partial and will change as the month progresses."
+        )
+
+    cy_dates = [cy_start + timedelta(days=i) for i in range((cy_end - cy_start).days + 1)]
+    ly_dates = [ly_start + timedelta(days=i) for i in range((ly_end - ly_start).days + 1)]
+
+    # ── Fetch: stay-date basis (occupancy / RevPAR / ADR) ───────────────────────
+    cy_sdf = expand_stay_dates(loading_stay_data(cy_start, cy_end))
+    ly_sdf = expand_stay_dates(loading_stay_data(ly_start, ly_end))
+    if not cy_sdf.empty:
+        cy_sdf = cy_sdf[(cy_sdf["stay_date"] >= cy_start) & (cy_sdf["stay_date"] <= cy_end)]
+    if not ly_sdf.empty:
+        ly_sdf = ly_sdf[(ly_sdf["stay_date"] >= ly_start) & (ly_sdf["stay_date"] <= ly_end)]
+
+    # ── Fetch: check-in date basis (source mix / lead time) ─────────────────────
+    df_cy_ci = loading_data(cy_start, cy_end)
+    df_ly_ci = loading_data(ly_start, ly_end)
+
+    # ── Fetch: raw incl. cancelled (cancellations) ───────────────────────────────
+    with st.spinner("Fetching data from Eviivo…"):
+        df_cy_all = to_df(fetch_bookings(cy_start, cy_end))
+        df_ly_all = to_df(fetch_bookings(ly_start, ly_end))
+
+    # ── Blocked rooms ────────────────────────────────────────────────────────────
+    blk_df = _load_blocks_csv(BLOCKS_CSV_PATH)
+    block_cy = _mer_blocked_stats(blk_df, cy_start, cy_end)
+    block_ly = _mer_blocked_stats(blk_df, ly_start, ly_end)
+
+    # ── Pre-compute lead-time / cancellation stats (needed by the narrative) ────
+    lt_cy = _mer_leadtime_stats(df_cy_ci)
+    lt_ly = _mer_leadtime_stats(df_ly_ci)
+    cancel_cy = _mer_cancellation_stats(df_cy_all)
+    cancel_ly = _mer_cancellation_stats(df_ly_all)
+
+    # ── Headline KPIs ────────────────────────────────────────────────────────────
+    kpi_rows = _mer_kpi_rows(cy_sdf, ly_sdf, cy_dates, ly_dates, cy_ym, ly_ym)
+    kpi_pdf_rows = _mer_kpi_table_rows(kpi_rows)
+
+    # ── Executive summary ────────────────────────────────────────────────────────
+    st.markdown("#### Executive Summary")
+    narrative = _mer_narrative(kpi_rows, lt_cy, lt_ly, cancel_cy, cancel_ly, cy_start, ly_start)
+    st.info(narrative)
+
+    # ── Observations (team notes, persisted to GitHub so they survive Streamlit Cloud restarts) ──
+    st.markdown("#### Observations")
+    month_key = f"{cy_start:%Y-%m}"
+    if "mer_notes_df" not in st.session_state or st.session_state.get("mer_notes_month") != month_key:
+        st.session_state.mer_notes_df = _load_mer_notes()
+        st.session_state.mer_notes_month = month_key
+    existing_note = _mer_get_note(st.session_state.mer_notes_df, month_key)
+    notes_text = st.text_area(
+        f"Notes for {cy_start:%B %Y} — e.g. weddings, refurbishments, weather, one-off events",
+        value=existing_note, height=120, key=f"mer_notes_input_{month_key}",
+    )
+    if st.button("💾 Save Notes", key=f"mer_notes_save_{month_key}"):
+        updated_df = _mer_set_note(st.session_state.mer_notes_df, month_key, notes_text)
+        if _save_mer_notes(updated_df):
+            st.session_state.mer_notes_df = updated_df
+            st.success("Notes saved.")
+
+    st.markdown("#### Headline KPIs")
+    kpi_disp = pd.DataFrame(
+        kpi_pdf_rows,
+        columns=["Property", "RNs", "Revenue", "ADR", "Occ %", "RevPAR", "YoY Rev %", "YoY Occ", "Signal", "Note"],
+    )
+    st.dataframe(kpi_disp, hide_index=True, use_container_width=True)
+    st.caption(
+        "Like-for-like total excludes properties not open in both the current and "
+        "prior-year month. Signal thresholds match the Pace Report tab: 🟢 ≥+15%, "
+        "🟡 0–15%, 🟠 0 to -15%, 🔴 <-15% YoY revenue."
+    )
+    for prop in PROP_NAMES:
+        for n in room_block_notes(prop, cy_dates) + room_block_notes(prop, ly_dates):
+            st.info(f"**{prop}**: {n}")
+
+    st.markdown("#### Weekday / Weekend / Sunday Split (group total)")
+    daytype_df = _mer_daytype_split(cy_sdf, ly_sdf, cy_dates, ly_dates)
+    st.dataframe(daytype_df, hide_index=True, use_container_width=True)
+    daytype_pdf_rows = daytype_df.values.tolist()
+
+    st.markdown("#### 6-Month Trend — Occupancy & RevPAR")
+    trend_df = _mer_trailing_trend(cy_start, months=6)
+    chart_pngs = {}
+    if not trend_df.empty:
+        fig_trend = go.Figure()
+        fig_trend.add_trace(go.Scatter(x=trend_df["month"], y=trend_df["cy_occ"], mode="lines+markers",
+                                        name="Occ % (this year)", line=dict(color=BRAND_GREEN)))
+        fig_trend.add_trace(go.Scatter(x=trend_df["month"], y=trend_df["ly_occ"], mode="lines+markers",
+                                        name="Occ % (last year)", line=dict(color=BRAND_GREEN, dash="dot")))
+        fig_trend.update_layout(
+            title="Occupancy % — trailing 6 months",
+            margin=dict(t=50, b=20), height=320, yaxis_title="Occupancy %",
+        )
+        st.plotly_chart(fig_trend, use_container_width=True)
+
+        fig_revpar = go.Figure()
+        fig_revpar.add_trace(go.Scatter(x=trend_df["month"], y=trend_df["cy_revpar"], mode="lines+markers",
+                                         name="RevPAR (this year)", line=dict(color="#40916c")))
+        fig_revpar.add_trace(go.Scatter(x=trend_df["month"], y=trend_df["ly_revpar"], mode="lines+markers",
+                                         name="RevPAR (last year)", line=dict(color="#40916c", dash="dot")))
+        fig_revpar.update_layout(
+            title="RevPAR — trailing 6 months",
+            margin=dict(t=50, b=20), height=320, yaxis_title="RevPAR (£)", yaxis_tickprefix="£",
+        )
+        st.plotly_chart(fig_revpar, use_container_width=True)
+        st.caption(
+            "Group totals here include all trading properties each month (like the Headline "
+            "KPIs' 'all trading properties' row, not the like-for-like row) — for months before "
+            "a newly-opened property existed, its full room count still counts as available "
+            "with zero revenue, which can understate that month's LY occupancy/RevPAR."
+        )
+
+        try:
+            chart_pngs["trend_occ"] = _mer_chart_png(fig_trend)
+            chart_pngs["trend_revpar"] = _mer_chart_png(fig_revpar)
+        except Exception:
+            pass
+
+    st.divider()
+
+    # ── Source mix ───────────────────────────────────────────────────────────────
+    st.markdown(f"#### Booking Source Mix — {cy_start:%B %Y} vs {ly_start:%B %Y} (LY)")
+    source_cy = _mer_source_mix(df_cy_ci)
+    source_ly = _mer_source_mix(df_ly_ci)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.caption(f"{cy_start:%B %Y}")
+        disp_cy = source_cy.copy()
+        if not disp_cy.empty:
+            disp_cy["Revenue"] = disp_cy["Revenue"].apply(fmt_gbp)
+            disp_cy["ADR"] = disp_cy["ADR"].apply(lambda v: fmt_gbp(v) if not pd.isna(v) else "—")
+            disp_cy["Rev %"] = disp_cy["Rev %"].apply(lambda v: f"{v:.1f}%")
+        st.dataframe(
+            disp_cy.rename(columns={"channel": "Channel", "Room_Nights": "Room Nights"}),
+            hide_index=True, use_container_width=True,
+        )
+    with c2:
+        st.caption(f"{ly_start:%B %Y} (LY)")
+        disp_ly = source_ly.copy()
+        if not disp_ly.empty:
+            disp_ly["Revenue"] = disp_ly["Revenue"].apply(fmt_gbp)
+            disp_ly["ADR"] = disp_ly["ADR"].apply(lambda v: fmt_gbp(v) if not pd.isna(v) else "—")
+            disp_ly["Rev %"] = disp_ly["Rev %"].apply(lambda v: f"{v:.1f}%")
+        st.dataframe(
+            disp_ly.rename(columns={"channel": "Channel", "Room_Nights": "Room Nights"}),
+            hide_index=True, use_container_width=True,
+        )
+
+    green_palette = ["#1b4332", "#2d6a4f", "#40916c", "#52b788", "#74c69d", "#95d5b2", "#b7e4c7", "#d8f3dc"]
+    c1, c2 = st.columns(2)
+    if not source_cy.empty:
+        fig_pie_cy = go.Figure([go.Pie(
+            labels=source_cy["channel"], values=source_cy["Revenue"], hole=0.45,
+            marker=dict(colors=green_palette[:len(source_cy)]), textinfo="label+percent",
+        )])
+        fig_pie_cy.update_layout(title=f"Revenue Share — {cy_start:%B %Y}", margin=dict(t=50, b=20), height=320, showlegend=False)
+        c1.plotly_chart(fig_pie_cy, use_container_width=True)
+        try:
+            chart_pngs["source_pie_cy"] = _mer_chart_png(fig_pie_cy)
+        except Exception:
+            pass
+    if not source_ly.empty:
+        fig_pie_ly = go.Figure([go.Pie(
+            labels=source_ly["channel"], values=source_ly["Revenue"], hole=0.45,
+            marker=dict(colors=green_palette[:len(source_ly)]), textinfo="label+percent",
+        )])
+        fig_pie_ly.update_layout(title=f"Revenue Share — {ly_start:%B %Y} (LY)", margin=dict(t=50, b=20), height=320, showlegend=False)
+        c2.plotly_chart(fig_pie_ly, use_container_width=True)
+        try:
+            chart_pngs["source_pie_ly"] = _mer_chart_png(fig_pie_ly)
+        except Exception:
+            pass
+
+    st.caption(
+        "Source mix is based on check-in date, unlike the stay-date-based KPIs above — "
+        "the two sections will not reconcile exactly for stays spanning month-end."
+    )
+
+    st.divider()
+
+    # ── Booking lead time ────────────────────────────────────────────────────────
+    st.markdown(f"#### Booking Lead Time — {cy_start:%B %Y} vs {ly_start:%B %Y} (LY)")
+    # lt_cy/lt_ly already computed above (needed by the executive summary)
+
+    def _mer_fmt_lt(v, pct=False):
+        if v is None:
+            return "—"
+        return f"{v:.1f}%" if pct else f"{v:.1f} days"
+
+    lt_table = pd.DataFrame([
+        {"Metric": "Avg lead time", f"{cy_start:%b %Y}": _mer_fmt_lt(lt_cy["avg"]), "LY": _mer_fmt_lt(lt_ly["avg"])},
+        {"Metric": "Median lead time", f"{cy_start:%b %Y}": _mer_fmt_lt(lt_cy["median"]), "LY": _mer_fmt_lt(lt_ly["median"])},
+        {"Metric": "Booked within 7 days", f"{cy_start:%b %Y}": _mer_fmt_lt(lt_cy["pct_7"], True), "LY": _mer_fmt_lt(lt_ly["pct_7"], True)},
+        {"Metric": "Booked within 14 days", f"{cy_start:%b %Y}": _mer_fmt_lt(lt_cy["pct_14"], True), "LY": _mer_fmt_lt(lt_ly["pct_14"], True)},
+        {"Metric": "Booked within 30 days", f"{cy_start:%b %Y}": _mer_fmt_lt(lt_cy["pct_30"], True), "LY": _mer_fmt_lt(lt_ly["pct_30"], True)},
+    ])
+    st.dataframe(lt_table, hide_index=True, use_container_width=True)
+
+    with st.expander("Lead-time distribution"):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.caption(f"{cy_start:%B %Y}")
+            st.dataframe(_mer_leadtime_buckets(df_cy_ci), hide_index=True, use_container_width=True)
+        with c2:
+            st.caption(f"{ly_start:%B %Y} (LY)")
+            st.dataframe(_mer_leadtime_buckets(df_ly_ci), hide_index=True, use_container_width=True)
+
+    bkt_order = ["Same day", "1–7 days", "8–14 days", "15–30 days", "31+ days"]
+    bkt_cy = _mer_leadtime_buckets(df_cy_ci).set_index("Lead Time").reindex(bkt_order, fill_value=0)
+    bkt_ly = _mer_leadtime_buckets(df_ly_ci).set_index("Lead Time").reindex(bkt_order, fill_value=0)
+    fig_lt = go.Figure([
+        go.Bar(name=f"{cy_start:%b %Y}", x=bkt_order, y=bkt_cy["Bookings"], marker_color=BRAND_GREEN),
+        go.Bar(name=f"{ly_start:%b %Y} (LY)", x=bkt_order, y=bkt_ly["Bookings"], marker_color=BRAND_LIGHT),
+    ])
+    fig_lt.update_layout(
+        title="Booking Lead-Time Distribution", barmode="group",
+        margin=dict(t=50, b=20), height=320, yaxis_title="Bookings",
+    )
+    st.plotly_chart(fig_lt, use_container_width=True)
+    try:
+        chart_pngs["leadtime"] = _mer_chart_png(fig_lt)
+    except Exception:
+        pass
+
+    st.divider()
+
+    # ── Cancellations ────────────────────────────────────────────────────────────
+    st.markdown(f"#### Cancellations — {cy_start:%B %Y} vs {ly_start:%B %Y} (LY)")
+    # cancel_cy/cancel_ly already computed above (needed by the executive summary)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Cancelled Bookings", cancel_cy["n"], delta=cancel_cy["n"] - cancel_ly["n"])
+    c2.metric("Room-Nights Lost", cancel_cy["rns"], delta=cancel_cy["rns"] - cancel_ly["rns"])
+    c3.metric("Revenue Lost", fmt_gbp(cancel_cy["rev"]))
+    c4.metric(
+        "% of Bookings",
+        f"{cancel_cy['pct']:.1f}%" if cancel_cy["pct"] is not None else "—",
+        delta=(f"{cancel_cy['pct'] - cancel_ly['pct']:.1f}pp"
+               if cancel_cy["pct"] is not None and cancel_ly["pct"] is not None else None),
+    )
+    with st.expander("Cancellations by channel and property"):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.caption(f"By channel — {cy_start:%B %Y}")
+            if cancel_cy["by_channel"].empty:
+                st.caption("No cancellations this month.")
+            else:
+                disp = cancel_cy["by_channel"].rename(columns={"group": "Channel"}).copy()
+                disp["Revenue"] = disp["Revenue"].apply(fmt_gbp)
+                st.dataframe(disp, hide_index=True, use_container_width=True)
+        with c2:
+            st.caption(f"By property — {cy_start:%B %Y}")
+            if cancel_cy["by_property"].empty:
+                st.caption("No cancellations this month.")
+            else:
+                disp = cancel_cy["by_property"].rename(columns={"group": "Property"}).copy()
+                disp["Revenue"] = disp["Revenue"].apply(fmt_gbp)
+                st.dataframe(disp, hide_index=True, use_container_width=True)
+
+    st.caption(
+        "Reflects bookings for check-ins in this month currently marked cancelled as of "
+        "today — Eviivo does not expose a cancellation date, so this cannot show "
+        "cancellations that occurred during the month itself, and may differ from a "
+        "report run on a different day."
+    )
+
+    st.divider()
+
+    # ── Blocked rooms ────────────────────────────────────────────────────────────
+    st.markdown(f"#### Blocked Rooms — {cy_start:%B %Y} vs {ly_start:%B %Y} (LY)")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.caption(f"{cy_start:%B %Y}")
+        if block_cy["available"]:
+            st.metric("Blocks", block_cy["n"])
+            st.metric("Room-Nights Blocked", block_cy["rns"])
+        else:
+            st.info("No blocked-rooms data available for this month.")
+    with c2:
+        st.caption(f"{ly_start:%B %Y} (LY)")
+        if block_ly["available"]:
+            st.metric("Blocks", block_ly["n"])
+            st.metric("Room-Nights Blocked", block_ly["rns"])
+        else:
+            st.info(
+                "No blocked-rooms data available for this month — the uploaded CSV "
+                "export does not appear to cover this period."
+            )
+
+    st.divider()
+
+    # ── PDF export ───────────────────────────────────────────────────────────────
+    pdf_bytes = _mer_build_pdf(
+        cy_start, ly_start, is_partial, narrative, notes_text,
+        kpi_pdf_rows, daytype_pdf_rows,
+        source_cy, source_ly,
+        lt_cy, lt_ly, cancel_cy, cancel_ly, block_cy, block_ly,
+        chart_pngs,
+    )
+    st.download_button(
+        "⬇️ Download Month-End Report (PDF)",
+        data=pdf_bytes,
+        file_name=f"month_end_report_{cy_start:%Y_%m}.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
