@@ -2101,6 +2101,10 @@ below. They appear as markers on the charts so you can see whether pick-up respo
     }
 
     def _add_rate_events(fig):
+        # add_vline's built-in annotation support tries to average the shape's x-values
+        # numerically to place the label — that crashes on a string/categorical x-axis
+        # (dates here are formatted labels like "14 Jun", not real datetimes). Drawing the
+        # line and annotation as separate calls sidesteps that broken code path entirely.
         if rate_log.empty:
             return
         for _, row in rate_log.iterrows():
@@ -2108,12 +2112,13 @@ below. They appear as markers on the charts so you can see whether pick-up respo
             if label not in pu_dates:
                 continue
             color = _CAT_COLORS.get(row["category"], "#adb5bd")
-            fig.add_vline(
-                x=label, line_dash="dot", line_color=color, line_width=1.5,
-                annotation_text=row["category"],
-                annotation_position="top",
-                annotation_font_size=9,
-                annotation_font_color=color,
+            fig.add_shape(
+                type="line", x0=label, x1=label, y0=0, y1=1, yref="paper",
+                line=dict(dash="dot", color=color, width=1.5),
+            )
+            fig.add_annotation(
+                x=label, y=1, yref="paper", yanchor="bottom", showarrow=False,
+                text=row["category"], font=dict(size=9, color=color),
             )
 
     fig_pu_occ = go.Figure([
