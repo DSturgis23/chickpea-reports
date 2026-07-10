@@ -73,7 +73,17 @@ st.markdown(
 TODAY = date.today()
 CY = TODAY.year
 LY = CY - 1
-PROP_NAMES = sorted(PROPERTIES.keys())
+ALL_PROP_NAMES = sorted(PROPERTIES.keys())
+
+# GitHub persistence (shared by Blocked Rooms, Pick-up Report's rate log, and Month-End
+# Report's Observations — Streamlit Cloud's local disk doesn't survive restarts/redeploys,
+# so anything a user uploads or types needs to round-trip through the repo instead).
+_GH_REPO = "DSturgis23/chickpea-reports"
+
+
+def _gh_headers() -> dict:
+    token = st.secrets.get("github_token", "")
+    return {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -82,6 +92,21 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
     st.caption(f"Data is cached for 1 hour. Today: {TODAY.strftime('%d %b %Y')}")
+    st.divider()
+
+    st.markdown("### Hotels")
+    st.caption("Untick to exclude a hotel from every report and total below.")
+    if "prop_selection" not in st.session_state:
+        st.session_state.prop_selection = {name: True for name in ALL_PROP_NAMES}
+    for name in ALL_PROP_NAMES:
+        st.session_state.prop_selection[name] = st.checkbox(
+            name, value=st.session_state.prop_selection.get(name, True), key=f"chk_{name}"
+        )
+    PROP_NAMES = [n for n in ALL_PROP_NAMES if st.session_state.prop_selection[n]]
+    if not PROP_NAMES:
+        st.warning("Select at least one hotel.")
+        PROP_NAMES = ALL_PROP_NAMES.copy()
+
     st.divider()
     st.caption("Reports pull from Eviivo PMS via API.")
 
@@ -579,7 +604,7 @@ def _load_mer_notes() -> pd.DataFrame:
     import base64, requests as _req
     try:
         resp = _req.get(
-            f"https://api.github.com/repos/{_RATE_LOG_REPO}/contents/{_MER_NOTES_GHPATH}",
+            f"https://api.github.com/repos/{_GH_REPO}/contents/{_MER_NOTES_GHPATH}",
             headers=_gh_headers(), timeout=15,
         )
         if resp.status_code == 200:
@@ -595,7 +620,7 @@ def _save_mer_notes(df: pd.DataFrame):
     import base64, requests as _req
     content = df.to_csv(index=False)
     encoded = base64.b64encode(content.encode()).decode()
-    url = f"https://api.github.com/repos/{_RATE_LOG_REPO}/contents/{_MER_NOTES_GHPATH}"
+    url = f"https://api.github.com/repos/{_GH_REPO}/contents/{_MER_NOTES_GHPATH}"
     get_resp = _req.get(url, headers=_gh_headers(), timeout=15)
     payload = {"message": "Update month-end report notes", "content": encoded}
     if get_resp.status_code == 200:
@@ -1498,15 +1523,49 @@ are exposed in the API.
 # TAB 5 — Blocked Rooms
 # ─────────────────────────────────────────────────────────────────────────────
 
-BLOCKS_CSV_PATH = "data/blocks.csv"
+_BLOCKS_GHPATH = "data/blocks.csv"
 
-def _load_blocks_csv(path: str) -> pd.DataFrame:
-    """Parse the Eviivo History-Blocks CSV export format."""
-    import os
-    if not os.path.exists(path):
+
+def _load_blocks_raw_gh() -> str:
+    """Fetch the raw blocks CSV text from GitHub — Eviivo's API has no blocked-rooms
+    endpoint (confirmed by testing every plausible one directly), so this stays a manual
+    CSV upload; persisting it to the repo instead of local disk means it survives
+    Streamlit Cloud restarts/redeploys instead of silently vanishing."""
+    import base64, requests as _req
+    try:
+        resp = _req.get(
+            f"https://api.github.com/repos/{_GH_REPO}/contents/{_BLOCKS_GHPATH}",
+            headers=_gh_headers(), timeout=15,
+        )
+        if resp.status_code == 200:
+            return base64.b64decode(resp.json()["content"]).decode()
+    except Exception:
+        pass
+    return ""
+
+
+def _save_blocks_raw_gh(raw_bytes: bytes) -> bool:
+    import base64, requests as _req
+    encoded = base64.b64encode(raw_bytes).decode()
+    url = f"https://api.github.com/repos/{_GH_REPO}/contents/{_BLOCKS_GHPATH}"
+    get_resp = _req.get(url, headers=_gh_headers(), timeout=15)
+    payload = {"message": "Update blocked-rooms CSV", "content": encoded}
+    if get_resp.status_code == 200:
+        payload["sha"] = get_resp.json()["sha"]
+    put_resp = _req.put(url, headers=_gh_headers(), json=payload, timeout=15)
+    if put_resp.status_code not in (200, 201):
+        st.error(f"Could not save blocks CSV to GitHub ({put_resp.status_code}). Check github_token in secrets.")
+        return False
+    return True
+
+
+def _load_blocks_csv(csv_text: str) -> pd.DataFrame:
+    """Parse the Eviivo History-Blocks CSV export format from raw CSV text."""
+    if not csv_text:
         return pd.DataFrame()
     try:
-        raw = pd.read_csv(path, header=None, dtype=str).fillna("")
+        from io import StringIO
+        raw = pd.read_csv(StringIO(csv_text), header=None, dtype=str).fillna("")
         # Format: each row = 11 repeated human headers + 11 data values
         # Skip row 0 (technical Textbox headers); data starts at column index 11
         data_rows = raw.iloc[1:, 11:].copy()
@@ -1530,6 +1589,15 @@ def _load_blocks_csv(path: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _get_blocks_df() -> pd.DataFrame:
+    """Load + parse the blocks CSV from GitHub, cached in session_state for this run
+    so every tab/section that needs it (Blocked Rooms tab, Month-End Report) doesn't
+    each hit the GitHub API separately."""
+    if "blocks_df_cache" not in st.session_state:
+        st.session_state.blocks_df_cache = _load_blocks_csv(_load_blocks_raw_gh())
+    return st.session_state.blocks_df_cache
+
+
 with tabs[4]:
     st.subheader("Blocked Rooms Report")
     with st.expander("ℹ️ How to read this report", expanded=False):
@@ -1551,25 +1619,24 @@ report shows only blocks that were **not deleted** — i.e. rooms that were genu
 taken out of sale for the period shown.
 
 **How to update:** Export "History - Blocks" from Eviivo (Dashboard → Standard Reports →
-History Blocks → Export) and upload it below. The file is saved so you only need to
-re-upload when you want fresher data.
+History Blocks → Export) and upload it below. It's saved to the repo (not local disk), so
+it survives app restarts — you only need to re-upload when you want fresher data, not
+after every deploy.
         """)
 
     # ── File upload ───────────────────────────────────────────────────────────
-    import os
-    os.makedirs("data", exist_ok=True)
-
     uploaded = st.file_uploader(
         "Upload Eviivo History-Blocks CSV export to refresh data",
         type="csv", key="blocks_upload",
         help="Export from Eviivo: Dashboard → Standard Reports → History Blocks → Export/Download",
     )
     if uploaded:
-        with open(BLOCKS_CSV_PATH, "wb") as f:
-            f.write(uploaded.read())
-        st.success("File saved — report updated.")
+        raw_bytes = uploaded.read()
+        if _save_blocks_raw_gh(raw_bytes):
+            st.session_state.blocks_df_cache = _load_blocks_csv(raw_bytes.decode())
+            st.success("Saved to the repo — report updated.")
 
-    blk_df = _load_blocks_csv(BLOCKS_CSV_PATH)
+    blk_df = _get_blocks_df()
 
     if blk_df.empty:
         st.info(
@@ -1859,20 +1926,14 @@ Bookings can still come in or cancel before the month arrives.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _RATE_LOG_COLS   = ["date", "property", "category", "notes"]
-_RATE_LOG_REPO   = "DSturgis23/chickpea-reports"
 _RATE_LOG_GHPATH = "data/rate_changes.csv"
-
-
-def _gh_headers() -> dict:
-    token = st.secrets.get("github_token", "")
-    return {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
 
 
 def _load_rate_log() -> pd.DataFrame:
     import base64, requests as _req
     try:
         resp = _req.get(
-            f"https://api.github.com/repos/{_RATE_LOG_REPO}/contents/{_RATE_LOG_GHPATH}",
+            f"https://api.github.com/repos/{_GH_REPO}/contents/{_RATE_LOG_GHPATH}",
             headers=_gh_headers(), timeout=15,
         )
         if resp.status_code == 200:
@@ -1891,7 +1952,7 @@ def _save_rate_log(df: pd.DataFrame):
     content = df.to_csv(index=False)
     encoded = base64.b64encode(content.encode()).decode()
     # Get current SHA (required for update)
-    url = f"https://api.github.com/repos/{_RATE_LOG_REPO}/contents/{_RATE_LOG_GHPATH}"
+    url = f"https://api.github.com/repos/{_GH_REPO}/contents/{_RATE_LOG_GHPATH}"
     get_resp = _req.get(url, headers=_gh_headers(), timeout=15)
     payload = {"message": "Update rate change log", "content": encoded}
     if get_resp.status_code == 200:
@@ -2016,7 +2077,7 @@ below. They appear as markers on the charts so you can see whether pick-up respo
             with c1:
                 log_date = st.date_input("Date of change", value=TODAY, key="rl_date")
             with c2:
-                log_prop = st.selectbox("Property", ["All properties"] + PROP_NAMES, key="rl_prop")
+                log_prop = st.selectbox("Property", ["All properties"] + ALL_PROP_NAMES, key="rl_prop")
             with c3:
                 log_cat = st.selectbox(
                     "Category",
@@ -2607,7 +2668,7 @@ than showing a misleading zero.
         df_ly_all = to_df(fetch_bookings(ly_start, ly_end))
 
     # ── Blocked rooms ────────────────────────────────────────────────────────────
-    blk_df = _load_blocks_csv(BLOCKS_CSV_PATH)
+    blk_df = _get_blocks_df()
     block_cy = _mer_blocked_stats(blk_df, cy_start, cy_end)
     block_ly = _mer_blocked_stats(blk_df, ly_start, ly_end)
 

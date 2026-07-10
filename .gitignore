@@ -4,6 +4,7 @@ __pycache__/
 .streamlit/secrets.toml
 data/*
 !data/rate_changes.csv
+!data/blocks.csv
 .env
 venv/
 .venv/
