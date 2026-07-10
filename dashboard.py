@@ -1070,10 +1070,15 @@ with tabs[1]:
 
 **Metrics explained:**
 - **Room Nights Sold** — total number of room-nights occupied in the period (e.g. a 3-night stay = 3 room-nights)
-- **Revenue** — total gross revenue (inc. VAT) attributed to those nights, split proportionally across each night of the stay
+- **Revenue** — total gross revenue (inc. VAT) attributed to those nights, split evenly across each night of the stay
 - **ADR (Average Daily Rate)** — Revenue ÷ Room Nights Sold. The average rate charged per occupied room per night
 - **Occupancy %** — Room Nights Sold ÷ Room Nights Available. Shows what percentage of available rooms were filled. 100% = fully booked every night
 - **RevPAR (Revenue per Available Room)** — Revenue ÷ Room Nights Available. The single most important hotel KPI — it captures both rate and occupancy together. ADR × Occupancy = RevPAR
+
+**Note on multi-night stays:** Eviivo's API only returns one total for the whole booking, not
+a night-by-night rate. So a 2-night stay billed at £150 + £160 shows here as an even £155/£155 —
+ADR and RevPAR on any given day can be slightly off if rates vary night-to-night within a stay.
+Totals across the full period are unaffected either way.
 
 **Day type split:**
 - **Weekday (Mon–Thu)** — typically lower demand, more likely to include corporate/mid-week bookings
@@ -1972,10 +1977,14 @@ key revenue metrics, average length of stay, and how many rooms were recently pi
 - **Avail** — total rooms available on that date
 - **RNs OTB** — confirmed rooms in-house that night (guests already booked for that stay date)
 - **Occ%** — RNs OTB ÷ Avail
-- **ADR** — average nightly rate of bookings in-house (revenue ÷ rooms, nightly share only)
+- **ADR** — average nightly rate of bookings in-house (revenue ÷ rooms, nightly share only — see note below)
 - **RevPAR** — nightly revenue ÷ available rooms
 - **Avg LOS** — average length of stay of bookings that include this night
 - **+1D / +3D / +7D** — rooms added to the books in the last 1, 3 or 7 days for that stay date
+
+**Note:** Eviivo only returns one total per booking, not a per-night rate, so multi-night stays
+are split evenly across their nights here. A given night's ADR can be slightly off if the real
+nightly rate varied within that stay; period totals aren't affected.
 
 **Rate & Restriction Log:** Record rate changes, min LOS updates, promotions, and stop-sells
 below. They appear as markers on the charts so you can see whether pick-up responded.
@@ -2619,6 +2628,10 @@ reconcile to the same totals for stays spanning a month boundary; that's expecte
 **Properties not yet open** in the current or prior-year month (e.g. Fleur de Lys before
 Sep 2025) show "N/A" for that side and are excluded from the like-for-like group total,
 but included in the full group total.
+
+**Note on ADR:** Eviivo's API only gives one total per booking, not a per-night rate, so
+multi-night stays are split evenly across their nights. Day-level ADR can be slightly off if
+the real rate varied within a stay; monthly totals aren't affected.
 
 **Cancellations** reflect bookings currently marked cancelled as of today — Eviivo
 doesn't expose a cancellation date, so this can't show cancellations that happened
