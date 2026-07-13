@@ -17,7 +17,6 @@ PROPERTIES = {
     "The Dog & Gun":       {"shortname": "DogandGunSP4",          "rooms": 6},
     "The Fleur de Lys":    {"shortname": "TheFleurdeLysInnBH21",  "rooms": 9},
     "The Grosvenor Arms":  {"shortname": "TheGrosvenorArmsSP3",   "rooms": 9},
-    "The Great Decoy":     {"shortname": "TheGreatDecoySP11",     "rooms": 8},
     "The Manor House Inn": {"shortname": "TheManorHouseInnBA4",   "rooms": 9},
     "The Pembroke Arms":   {"shortname": "PembrokeSP2",           "rooms": 9},
     "The Queen's Head":    {"shortname": "TheQueensHeadSP5",      "rooms": 9},
@@ -74,7 +73,6 @@ APP_PASSWORD = "chickpea2024"
 OPENING_DATES = {
     "The Manor House Inn": date(2025, 2, 1),   # opened 1 Feb 2025 (Jan 2025 = pre-opening, Feb = partial)
     "The Fleur de Lys":    date(2025, 9, 1),   # opened Sep 2025
-    "The Great Decoy":     date(2026, 6, 10),  # opened 10 Jun 2026 (Jun 2026 = partial)
 }
 
 # Known closure / refurbishment periods — flag these rather than show misleading variances
