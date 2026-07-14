@@ -1852,9 +1852,9 @@ Bookings can still come in or cancel before the month arrives.
 
             rows.append({
                 "Month":    m_start.strftime("%B %Y"),
-                "OTB RNs":  cy_rns or "—",
+                "OTB RNs":  str(cy_rns) if cy_rns else "—",
                 "OTB Rev":  fmt_gbp(cy_rev) if cy_rev else "—",
-                "LY RNs":   ly_rns or "—",
+                "LY RNs":   str(ly_rns) if ly_rns else "—",
                 "LY Rev":   fmt_gbp(ly_rev) if ly_rev else "—",
                 "Δ RNs":    f"{'+' if var_rns >= 0 else ''}{var_rns}" if ly_rns else "—",
                 "Δ Rev":    fmt_var(var_rev) if ly_rev else "—",
@@ -2040,7 +2040,7 @@ below. They appear as markers on the charts so you can see whether pick-up respo
             avg_los = los_nights / los_count if los_count else 0
             row.update({
                 "Avail":    avail_total,
-                "RNs OTB":  rns or "—",
+                "RNs OTB":  str(rns) if rns else "—",
                 "Occ%":     f"{occ*100:.0f}%",
                 "ADR":      fmt_gbp(adr) if adr else "—",
                 "RevPAR":   fmt_gbp(rev / avail_total) if avail_total else "—",
