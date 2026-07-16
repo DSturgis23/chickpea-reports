@@ -61,6 +61,24 @@ Current occupancy on the books vs last year for each date in the next two months
 Modelled on Lighthouse report format. Shows today's position only — daily snapshot storage would be
 needed to show pick-up vs 7/14/28 days ago (future enhancement).
 
+### 8. Booking Window
+How far in advance guests book (lead time between booking creation and check-in), bucketed
+from same-day to 181+ days. Shown by property so you can see which venues fill early and which
+need a late push. OTAs typically show shorter lead times than direct bookings.
+
+### 9. Potential Corporate Guests
+Direct/phone guests (not OTA, not corporate travel agency) who've checked in midweek
+(Sun–Thu) more than once since 1 Jan 2026 — a proxy for guests staying on business, worth
+approaching about a corporate rate. Guests are matched by email, falling back to phone, then
+name (Eviivo issues a fresh guest ID per booking so it can't be used to spot repeats).
+
+### 10. Month-End Report
+Single-month headline KPIs (revenue, RevPAR, ADR, occupancy), source mix, lead time,
+cancellations, and blocked rooms, each vs the same month last year. Occupancy/RevPAR/ADR are
+stay-date based; source mix/lead time are check-in-date based, so the two sections won't
+reconcile for stays spanning a month boundary — that's expected. Exportable as a PDF via the
+download button at the bottom of the tab.
+
 ---
 
 ## Properties
@@ -70,6 +88,7 @@ needed to show pick-up vs 7/14/28 days ago (future enhancement).
 | The Bell & Crown | TheBellBA121 | 6 |
 | The Dog & Gun | DogandGunSP4 | 6 |
 | The Fleur de Lys | TheFleurdeLysInnBH21 | 9 |
+| The Great Decoy | TheGreatDecoySP11 | 8 (opened 10 Jun 2026) |
 | The Grosvenor Arms | TheGrosvenorArmsSP3 | 9 |
 | The Manor House Inn | TheManorHouseInnBA4 | 9 |
 | The Pembroke Arms | PembrokeSP2 | 9 |
@@ -85,6 +104,20 @@ needed to show pick-up vs 7/14/28 days ago (future enhancement).
 | `eviivo.py` | Eviivo API client — auth, fetching, parsing |
 | `config.py` | Credentials, property config, room counts, opening dates, closures |
 | `data/blocks.csv` | Blocked rooms data (manual export from Eviivo) |
+
+---
+
+## Streamlit Cloud gotchas
+
+**Python version is a dashboard setting, not a repo file.** `runtime.txt` is ignored by Streamlit
+Community Cloud — it does not control the interpreter version. If a deploy starts crashing with a
+Python version in the dependency-resolution log that doesn't match local dev (currently 3.12), fix
+it in the app's **Settings → General → Python version** dropdown in the Streamlit Cloud UI, then
+save to trigger a reboot.
+
+**Pin every dependency version** in `requirements.txt` — an unpinned package (or the interpreter
+itself) drifting forward on a routine redeploy has caused real outages here before (kaleido
+`>=0.2.1` silently pulling a version that launches headless Chrome and segfaults in the sandbox).
 
 ---
 
