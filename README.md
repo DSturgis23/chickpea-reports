@@ -6,8 +6,8 @@ Runs separately from the SevenRooms reservations dashboard on port **8502**.
 ## Running the app
 
 ```
-cd "C:\Users\Delilah Sturgis\Documents\Chickpea\chickpea_reports"
-streamlit run dashboard.py --server.port 8502
+cd ~/Documents/Chickpea/chickpea_reports
+.venv/bin/streamlit run dashboard.py --server.port 8502
 ```
 
 Open http://localhost:8502 — password: see `.streamlit/secrets.toml`
@@ -33,9 +33,11 @@ Booking channel breakdown (Booking.com, Expedia, Agoda, direct, corporate travel
 Channel is detected from guest email domain — OTAs use anonymised addresses (e.g. `@guest.booking.com`).
 
 ### 4. Rate Plans
-Revenue and booking volume by rate plan (B&B, Room Only, Dinner B&B, Half Board) for a chosen date range.
-Rate plan is detected from the booking note field. OTA bookings classify reliably (~100%); direct bookings
-classify where staff have entered a rate plan in the Eviivo booking note.
+Revenue and booking volume by rate plan (House Rate, Landmarc, B&B, Room Only) for a chosen date range.
+Toggle buttons filter rate plans in and out — select one plan to see it by property, or several to see the mix.
+- **Landmarc** is detected from the booking email (`@landmarcsolutions.com`) — fixed £110/night corporate rate
+- **B&B / Room Only** are detected from booking note keywords (Dinner B&B and Half Board count as B&B)
+- **House Rate** is the default for anything else, including bookings with no descriptive note
 
 **Pending:** Eviivo to grant `r:ApiRatePlans` API scope — once done, all bookings will classify correctly
 regardless of whether a note was entered. Raise with Eviivo support.

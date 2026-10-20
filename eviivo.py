@@ -94,19 +94,29 @@ def _channel_from_email(email: str) -> str:
     return "Direct / Phone"
 
 
+_LANDMARC_EMAIL_DOMAIN = "landmarcsolutions.com"  # corporate account, fixed £110/night rate
+
+
 def _rate_plan_from_note(note: str) -> str:
+    """Guess B&B / Room Only from booking note keywords. Dinner B&B and Half Board notes
+    fold into B&B too — both include breakfast, same as a plain B&B booking."""
     n = note.lower()
-    if "dbb" in n or ("dinner" in n and "breakfast" in n):
-        return "Dinner B&B"
-    if "half board" in n or "half-board" in n:
-        return "Half Board"
-    if "breakfast is included" in n or "b&b" in n or "bed and breakfast" in n or "base rate" in n:
-        return "B&B"
-    if "breakfast" in n:
+    if ("dbb" in n or ("dinner" in n and "breakfast" in n) or "half board" in n or "half-board" in n
+            or "breakfast is included" in n or "b&b" in n or "bed and breakfast" in n or "breakfast" in n):
         return "B&B"
     if "room only" in n:
         return "Room Only"
-    return "Unknown"
+    return "House Rate"
+
+
+def _rate_plan(note: str, email: str) -> str:
+    """Rate plan for the Rate Plan Report. Landmarc is detected from their booking email
+    (100% reliable — confirmed against live data) and checked first, since their notes
+    don't always mention a package (e.g. 'invoiced -DS'). Everything else falls back to
+    note-keyword guessing, since Eviivo's RatePlanId always returns 0 for these credentials."""
+    if email and _LANDMARC_EMAIL_DOMAIN in email.lower():
+        return "Landmarc"
+    return _rate_plan_from_note(note or "")
 
 
 def _parse_booking(rec: dict, venue_name: str) -> Optional[dict]:
@@ -144,8 +154,8 @@ def _parse_booking(rec: dict, venue_name: str) -> Optional[dict]:
     guest_name = f"{(g0.get('FirstName') or '').strip()} {(g0.get('Surname') or '').strip()}".strip() or "Unknown"
     guest_phone = g0.get("Telephone") or ""
 
-    # Rate plan: detected from BookingNote (RatePlanId is always 0 in this API)
-    rate_plan = _rate_plan_from_note(b.get("BookingNote") or "")
+    # Rate plan: Landmarc from guest email, else guessed from BookingNote (RatePlanId is always 0 in this API)
+    rate_plan = _rate_plan(b.get("BookingNote") or "", primary_email)
 
     # Room type from the Room object
     room_obj = b.get("Room")

@@ -1462,30 +1462,35 @@ with tabs[3]:
     st.subheader("Rate Plan Report")
     with st.expander("ℹ️ How to read this report", expanded=False):
         st.markdown("""
-**What it shows:** Revenue and bookings broken down by rate plan (e.g. B&B, Room Only,
-Dinner B&B, promotional rates) for a chosen month.
+**What it shows:** Revenue and bookings broken down by rate plan for a chosen month.
+
+**Categories:**
+- **House Rate** — the default bucket: any booking that isn't Landmarc, B&B, or Room Only
+- **Landmarc** — corporate bookings for Landmarc Solutions, identified from their booking email
+  (`travel@landmarcsolutions.com`). Priced at a fixed **£110/night**
+- **B&B** — includes breakfast (also covers Dinner B&B / Half Board bookings, and OTA "B&B" tags —
+  anything with breakfast included counts as B&B)
+- **Room Only** — no breakfast included
 
 **Columns explained:**
-- **Rate Plan** — the pricing package used for the booking (e.g. "B&B" includes breakfast, "Room Only" does not)
 - **Bookings** — number of reservations on this rate plan
 - **Room Nights** — total room-nights at this rate
 - **Revenue** — gross revenue (inc. VAT) from this rate plan
 - **ADR** — average nightly rate for this plan
 - **Rev %** — this plan's share of total monthly revenue
 
-**Why it matters:** Rate plan mix tells you what guests are buying. A shift from Room Only to B&B
-increases revenue per booking. Promotional rates will show lower ADR — useful to see whether
-discounted rates are filling rooms that would otherwise be empty, or cannibalising full-rate bookings.
+**Why it matters:** Rate plan mix tells you what guests are buying, and keeps the fixed-rate Landmarc
+account visible separately from the rest of the mix.
 
-**Note:** The Eviivo API currently returns a rate plan ID rather than the plan name. If plan names
-are showing as IDs, this can be resolved by asking Eviivo support to confirm how rate plan names
-are exposed in the API.
+**Note:** Landmarc is identified with certainty (their booking email domain). House Rate / B&B / Room
+Only are guessed from booking note keywords, since Eviivo's API doesn't expose the real rate plan name
+for our credentials (`RatePlanId` always returns 0) — bookings with no descriptive note default to
+House Rate even if they were actually B&B or Room Only.
         """)
 
-
     st.info(
-        "Rate plan is detected from the booking notes field in Eviivo (e.g. 'breakfast is included "
-        "in the room rate' → B&B). Bookings with no recognisable keyword appear as **Unknown**."
+        "Landmarc is detected from the booking email (`travel@landmarcsolutions.com`). B&B / Room Only "
+        "are detected from keywords in the booking notes. Anything else defaults to **House Rate**."
     )
 
     c1, c2 = st.columns(2)
@@ -1494,91 +1499,151 @@ are exposed in the API.
     with c2:
         rp_to = st.date_input("To", value=TODAY, key="rp_to")
 
+    RATE_PLAN_OPTIONS = ["House Rate", "Landmarc", "B&B", "Room Only"]
+    rp_selected = st.pills(
+        "Rate Plans — click to toggle in / out", RATE_PLAN_OPTIONS,
+        selection_mode="multi", default=RATE_PLAN_OPTIONS, key="rp_selected",
+    ) or []
+    # One plan selected → single-plan view; several → mix view across just those plans
+    rp_plan_choice = rp_selected[0] if len(rp_selected) == 1 else "All Rate Plans"
+
     if rp_from > rp_to:
         st.error("'From' date must be before 'To' date.")
     else:
         df_rp = loading_data(rp_from, rp_to)
+        if not df_rp.empty:
+            df_rp = df_rp[df_rp["rate_plan"].isin(rp_selected)]
 
-        if df_rp.empty:
-            st.info("No confirmed bookings in this period.")
+        if not rp_selected:
+            st.info("Select at least one rate plan above.")
+        elif df_rp.empty:
+            st.info("No confirmed bookings for the selected rate plans in this period.")
         else:
-            rp_grp = df_rp.groupby("rate_plan").agg(
-                Bookings=("booking_ref", "count"),
-                Room_Nights=("nights", "sum"),
-                Revenue=("revenue", "sum"),
-            ).reset_index()
-            rp_grp["ADR"]   = rp_grp["Revenue"] / rp_grp["Room_Nights"].replace(0, np.nan)
-            rp_grp["Rev %"] = rp_grp["Revenue"] / rp_grp["Revenue"].sum() * 100
-            rp_grp = rp_grp.sort_values("Revenue", ascending=False)
-
-            total_rp = pd.DataFrame([{
-                "rate_plan":   "TOTAL",
-                "Bookings":    rp_grp["Bookings"].sum(),
-                "Room_Nights": rp_grp["Room_Nights"].sum(),
-                "Revenue":     rp_grp["Revenue"].sum(),
-                "ADR":         rp_grp["Revenue"].sum() / rp_grp["Room_Nights"].sum() if rp_grp["Room_Nights"].sum() else 0,
-                "Rev %":       100.0,
-            }])
-            rp_grp = pd.concat([rp_grp, total_rp], ignore_index=True)
-
-            disp_rp = rp_grp.copy()
-            disp_rp.columns = ["Rate Plan", "Bookings", "Room Nights", "Revenue", "ADR", "Rev %"]
-            disp_rp["Revenue"] = disp_rp["Revenue"].apply(fmt_gbp)
-            disp_rp["ADR"]     = disp_rp["ADR"].apply(fmt_gbp)
-            disp_rp["Rev %"]   = disp_rp["Rev %"].apply(lambda v: f"{v:.1f}%")
-
-            st.markdown("#### All Properties")
-            st.dataframe(disp_rp, hide_index=True, use_container_width=True)
-
-            # ── Charts ────────────────────────────────────────────────────────
             import plotly.graph_objects as go
-            st.divider()
-            st.markdown("#### Charts")
 
-            rp_chart = rp_grp[rp_grp["rate_plan"] != "TOTAL"].copy().sort_values("Revenue", ascending=True)
+            if rp_plan_choice != "All Rate Plans":
+                # ── Single rate plan view ────────────────────────────────────
+                df_sel = df_rp[df_rp["rate_plan"] == rp_plan_choice]
+                if df_sel.empty:
+                    st.info(f"No {rp_plan_choice} bookings in this period.")
+                else:
+                    total_bookings = len(df_sel)
+                    total_nights   = df_sel["nights"].sum()
+                    total_revenue  = df_sel["revenue"].sum()
+                    adr            = total_revenue / total_nights if total_nights else 0
 
-            fig_rp_rev = go.Figure([
-                go.Bar(y=rp_chart["rate_plan"], x=rp_chart["Revenue"],
-                       orientation="h", marker_color=BRAND_GREEN)
-            ])
-            fig_rp_rev.update_layout(
-                title="Revenue by Rate Plan",
-                xaxis_title="Revenue (£)", xaxis_tickprefix="£", xaxis_tickformat=",.0f",
-                margin=dict(t=50, b=20, l=130), height=max(280, len(rp_chart) * 60),
-                showlegend=False,
-            )
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Bookings", f"{total_bookings:,}")
+                    m2.metric("Room Nights", f"{int(total_nights):,}")
+                    m3.metric("Revenue", fmt_gbp(total_revenue))
+                    m4.metric("ADR", fmt_gbp(adr))
 
-            green_palette = ["#1b4332","#2d6a4f","#40916c","#52b788","#74c69d","#95d5b2","#b7e4c7","#d8f3dc"]
-            fig_rp_pie = go.Figure([
-                go.Pie(
-                    labels=rp_chart["rate_plan"], values=rp_chart["Revenue"],
-                    hole=0.45,
-                    marker=dict(colors=green_palette[:len(rp_chart)]),
-                    textinfo="label+percent",
-                )
-            ])
-            fig_rp_pie.update_layout(
-                title="Revenue Share by Rate Plan",
-                margin=dict(t=50, b=20), height=320, showlegend=False,
-            )
-
-            c1, c2 = st.columns(2)
-            c1.plotly_chart(fig_rp_rev, use_container_width=True)
-            c2.plotly_chart(fig_rp_pie, use_container_width=True)
-
-            with st.expander("Breakdown by property"):
-                for prop in PROP_NAMES:
-                    pdf_rp = df_rp[df_rp["venue_name"] == prop].groupby("rate_plan").agg(
+                    st.markdown(f"#### {rp_plan_choice} by Property")
+                    prop_grp = df_sel.groupby("venue_name").agg(
                         Bookings=("booking_ref", "count"),
+                        Room_Nights=("nights", "sum"),
                         Revenue=("revenue", "sum"),
-                    ).reset_index().sort_values("Revenue", ascending=False)
-                    if not pdf_rp.empty:
-                        st.caption(f"**{prop}**")
-                        pdf_rp["Revenue"] = pdf_rp["Revenue"].apply(fmt_gbp)
-                        st.dataframe(
-                            pdf_rp.rename(columns={"rate_plan": "Rate Plan"}),
-                            hide_index=True,
-                        )
+                    ).reset_index()
+                    prop_grp["ADR"] = prop_grp["Revenue"] / prop_grp["Room_Nights"].replace(0, np.nan)
+                    prop_grp = prop_grp.sort_values("Revenue", ascending=False)
+
+                    disp_prop = prop_grp.copy()
+                    disp_prop.columns = ["Property", "Bookings", "Room Nights", "Revenue", "ADR"]
+                    disp_prop["Revenue"] = disp_prop["Revenue"].apply(fmt_gbp)
+                    disp_prop["ADR"]     = disp_prop["ADR"].apply(fmt_gbp)
+                    st.dataframe(disp_prop, hide_index=True, use_container_width=True)
+
+                    chart_prop = prop_grp.sort_values("Revenue", ascending=True)
+                    fig_prop = go.Figure([
+                        go.Bar(y=chart_prop["venue_name"], x=chart_prop["Revenue"],
+                               orientation="h", marker_color=BRAND_GREEN)
+                    ])
+                    fig_prop.update_layout(
+                        title=f"{rp_plan_choice} Revenue by Property",
+                        xaxis_title="Revenue (£)", xaxis_tickprefix="£", xaxis_tickformat=",.0f",
+                        margin=dict(t=50, b=20, l=130), height=max(280, len(chart_prop) * 60),
+                        showlegend=False,
+                    )
+                    st.plotly_chart(fig_prop, use_container_width=True)
+
+            else:
+                # ── All rate plans view ──────────────────────────────────────
+                rp_grp = df_rp.groupby("rate_plan").agg(
+                    Bookings=("booking_ref", "count"),
+                    Room_Nights=("nights", "sum"),
+                    Revenue=("revenue", "sum"),
+                ).reset_index()
+                rp_grp["ADR"]   = rp_grp["Revenue"] / rp_grp["Room_Nights"].replace(0, np.nan)
+                rp_grp["Rev %"] = rp_grp["Revenue"] / rp_grp["Revenue"].sum() * 100
+                rp_grp = rp_grp.sort_values("Revenue", ascending=False)
+
+                total_rp = pd.DataFrame([{
+                    "rate_plan":   "TOTAL",
+                    "Bookings":    rp_grp["Bookings"].sum(),
+                    "Room_Nights": rp_grp["Room_Nights"].sum(),
+                    "Revenue":     rp_grp["Revenue"].sum(),
+                    "ADR":         rp_grp["Revenue"].sum() / rp_grp["Room_Nights"].sum() if rp_grp["Room_Nights"].sum() else 0,
+                    "Rev %":       100.0,
+                }])
+                rp_grp = pd.concat([rp_grp, total_rp], ignore_index=True)
+
+                disp_rp = rp_grp.copy()
+                disp_rp.columns = ["Rate Plan", "Bookings", "Room Nights", "Revenue", "ADR", "Rev %"]
+                disp_rp["Revenue"] = disp_rp["Revenue"].apply(fmt_gbp)
+                disp_rp["ADR"]     = disp_rp["ADR"].apply(fmt_gbp)
+                disp_rp["Rev %"]   = disp_rp["Rev %"].apply(lambda v: f"{v:.1f}%")
+
+                st.markdown("#### All Properties")
+                st.dataframe(disp_rp, hide_index=True, use_container_width=True)
+
+                # ── Charts ────────────────────────────────────────────────────
+                st.divider()
+                st.markdown("#### Charts")
+
+                rp_chart = rp_grp[rp_grp["rate_plan"] != "TOTAL"].copy().sort_values("Revenue", ascending=True)
+
+                fig_rp_rev = go.Figure([
+                    go.Bar(y=rp_chart["rate_plan"], x=rp_chart["Revenue"],
+                           orientation="h", marker_color=BRAND_GREEN)
+                ])
+                fig_rp_rev.update_layout(
+                    title="Revenue by Rate Plan",
+                    xaxis_title="Revenue (£)", xaxis_tickprefix="£", xaxis_tickformat=",.0f",
+                    margin=dict(t=50, b=20, l=130), height=max(280, len(rp_chart) * 60),
+                    showlegend=False,
+                )
+
+                green_palette = ["#1b4332","#2d6a4f","#40916c","#52b788","#74c69d","#95d5b2","#b7e4c7","#d8f3dc"]
+                fig_rp_pie = go.Figure([
+                    go.Pie(
+                        labels=rp_chart["rate_plan"], values=rp_chart["Revenue"],
+                        hole=0.45,
+                        marker=dict(colors=green_palette[:len(rp_chart)]),
+                        textinfo="label+percent",
+                    )
+                ])
+                fig_rp_pie.update_layout(
+                    title="Revenue Share by Rate Plan",
+                    margin=dict(t=50, b=20), height=320, showlegend=False,
+                )
+
+                c1, c2 = st.columns(2)
+                c1.plotly_chart(fig_rp_rev, use_container_width=True)
+                c2.plotly_chart(fig_rp_pie, use_container_width=True)
+
+                with st.expander("Breakdown by property"):
+                    for prop in PROP_NAMES:
+                        pdf_rp = df_rp[df_rp["venue_name"] == prop].groupby("rate_plan").agg(
+                            Bookings=("booking_ref", "count"),
+                            Revenue=("revenue", "sum"),
+                        ).reset_index().sort_values("Revenue", ascending=False)
+                        if not pdf_rp.empty:
+                            st.caption(f"**{prop}**")
+                            pdf_rp["Revenue"] = pdf_rp["Revenue"].apply(fmt_gbp)
+                            st.dataframe(
+                                pdf_rp.rename(columns={"rate_plan": "Rate Plan"}),
+                                hide_index=True,
+                            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
