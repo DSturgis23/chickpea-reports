@@ -1146,8 +1146,65 @@ Totals across the full period are unaffected either way.
                 else:
                     st.dataframe(kpi_table(sub, days), hide_index=True, use_container_width=True)
 
+            # ── Room nights vs same date range one week earlier ─────────────────
+            wk_from_lw = wk_from - timedelta(days=7)
+            wk_to_lw   = wk_to   - timedelta(days=7)
+            all_dates_lw = [wk_from_lw + timedelta(days=i) for i in range((wk_to_lw - wk_from_lw).days + 1)]
+
+            df_wk_lw = loading_stay_data(wk_from_lw, wk_to_lw)
+            sdf_lw = expand_stay_dates(df_wk_lw) if not df_wk_lw.empty else pd.DataFrame()
+            if not sdf_lw.empty:
+                sdf_lw = sdf_lw[(sdf_lw["stay_date"] >= wk_from_lw) & (sdf_lw["stay_date"] <= wk_to_lw)]
+
+            def vs_lw(curr, prev, kind):
+                if kind == "gbp":
+                    fig = fmt_gbp(prev)
+                elif kind == "occ":
+                    fig = f"{prev * 100:.1f}%"
+                else:
+                    fig = f"{int(prev)}"
+                pc = fmt_pct((curr - prev) / prev * 100) if prev else "—"
+                return f"{fig} ({pc})"
+
+            def combined_row(label, prop):
+                c = kpi_values(sdf, all_dates, prop)
+                p = kpi_values(sdf_lw, all_dates_lw, prop)
+                return {
+                    "Property":           label,
+                    "Room Nights Sold":   int(c["rns"]),
+                    "RNs vs LW":          vs_lw(c["rns"], p["rns"], "num"),
+                    "Revenue":            fmt_gbp(c["rev"]),
+                    "Revenue vs LW":      vs_lw(c["rev"], p["rev"], "gbp"),
+                    "ADR":                fmt_gbp(c["adr"]),
+                    "ADR vs LW":          vs_lw(c["adr"], p["adr"], "gbp"),
+                    "Occupancy":          f"{c['occ']*100:.1f}%",
+                    "Occupancy vs LW":    vs_lw(c["occ"], p["occ"], "occ"),
+                    "RevPAR":             fmt_gbp(c["revpar"]),
+                    "RevPAR vs LW":       vs_lw(c["revpar"], p["revpar"], "gbp"),
+                }
+
+            combined = pd.DataFrame(
+                [combined_row(p, p) for p in PROP_NAMES] + [combined_row("GROUP TOTAL", None)]
+            )
+
+            def _lw_color(v):
+                if isinstance(v, str):
+                    if "(+" in v:
+                        return "color: #1a7f37; font-weight: 600"
+                    if "(-" in v:
+                        return "color: #c0392b; font-weight: 600"
+                return ""
+
             st.markdown("#### All Days Combined")
-            st.dataframe(kpi_table(sdf, all_dates), hide_index=True, use_container_width=True)
+            st.dataframe(
+                combined.style.map(_lw_color, subset=[c for c in combined.columns if c.endswith("vs LW")]),
+                hide_index=True, use_container_width=True,
+            )
+            st.caption(
+                f"vs LW compares with the same dates one week earlier "
+                f"({wk_from_lw.strftime('%d %b')} – {wk_to_lw.strftime('%d %b %Y')}). "
+                "Each vs LW column shows last week's figure and the % change since. Green = up, red = down."
+            )
 
             # ── YoY comparison vs same period last year ─────────────────────────
             wk_from_ly = wk_from - relativedelta(years=1)
