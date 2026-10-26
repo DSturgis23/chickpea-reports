@@ -17,7 +17,7 @@ PROPERTIES = {
     "The Dog & Gun":       {"shortname": "DogandGunSP4",          "rooms": 6},
     "The Fleur de Lys":    {"shortname": "TheFleurdeLysInnBH21",  "rooms": 9},
     "The Grosvenor Arms":  {"shortname": "TheGrosvenorArmsSP3",   "rooms": 9},
-    "The Great Decoy":     {"shortname": "TheGreatDecoySP11",     "rooms": 8},
+    "The Great Decoy":     {"shortname": "TheGreatDecoySP11",     "rooms": 10},
     "The Manor House Inn": {"shortname": "TheManorHouseInnBA4",   "rooms": 9},
     "The Pembroke Arms":   {"shortname": "PembrokeSP2",           "rooms": 9},
     "The Queen's Head":    {"shortname": "TheQueensHeadSP5",      "rooms": 9},
@@ -26,6 +26,10 @@ PROPERTIES = {
 # Queen's Head expanded from 4 to 9 rooms on 1 April 2026
 _QH_EXPANSION = date(2026, 4, 1)
 _QH_OLD_ROOMS = 4
+
+# Great Decoy added rooms 9 & 10 on 2 October 2026 (8 rooms before)
+_GD_EXPANSION = date(2026, 10, 2)
+_GD_OLD_ROOMS = 8
 
 # Ad-hoc room blocks: rooms taken out of saleable inventory for private events etc.
 # Each entry: (property, from_date, to_date, rooms_blocked, reason)
@@ -37,6 +41,8 @@ ROOM_BLOCKS = [
 def get_room_count(property_name: str, for_date: date) -> int:
     if property_name == "The Queen's Head" and for_date < _QH_EXPANSION:
         rooms = _QH_OLD_ROOMS
+    elif property_name == "The Great Decoy" and for_date < _GD_EXPANSION:
+        rooms = _GD_OLD_ROOMS
     else:
         rooms = PROPERTIES[property_name]["rooms"]
     for prop, from_d, to_d, blocked, _ in ROOM_BLOCKS:
