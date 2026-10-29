@@ -108,6 +108,16 @@ with st.sidebar:
         PROP_NAMES = ALL_PROP_NAMES.copy()
 
     st.divider()
+    st.markdown("### Date basis")
+    DATE_BASIS = st.radio(
+        "Weekly / MTD, Pick-up and Month-End",
+        ["Check-in date", "Stay date"], key="date_basis",
+        help="Check-in date counts every night and £ of a booking on the day the guest arrives. "
+             "Stay date spreads it across each night they're in house.",
+    )
+    CHECKIN_BASIS = DATE_BASIS == "Check-in date"
+
+    st.divider()
     st.caption("Reports pull from Eviivo PMS via API.")
 
 
@@ -146,6 +156,14 @@ def expand_stay_dates(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
     out["stay_date"] = pd.to_datetime(out["stay_date"]).dt.date
+    return out
+
+
+def expand_checkin_dates(df: pd.DataFrame) -> pd.DataFrame:
+    """Like expand_stay_dates, but every night of a booking is credited to its check-in date."""
+    out = expand_stay_dates(df)
+    if not out.empty:
+        out["stay_date"] = out["checkin"]
     return out
 
 
@@ -225,6 +243,18 @@ def loading_data(from_d: date, to_d: date) -> pd.DataFrame:
             f"Error type: {type(e).__name__}"
         )
         return pd.DataFrame()
+
+
+def load_nights(from_d: date, to_d: date) -> pd.DataFrame:
+    """One row per room-night dated within [from_d, to_d], on the sidebar's date basis.
+    `stay_date` is the night itself (stay basis) or the booking's arrival day (check-in basis)."""
+    if CHECKIN_BASIS:
+        sdf = expand_checkin_dates(loading_data(from_d, to_d))
+    else:
+        sdf = expand_stay_dates(loading_stay_data(from_d, to_d))
+    if not sdf.empty:
+        sdf = sdf[(sdf["stay_date"] >= from_d) & (sdf["stay_date"] <= to_d)]
+    return sdf
 
 
 # ── Month-End Report helpers ────────────────────────────────────────────────────
@@ -313,7 +343,7 @@ def _mer_daytype_split(cy_sdf: pd.DataFrame, ly_sdf: pd.DataFrame, cy_dates: lis
 
 def _mer_trailing_trend(cy_start: date, months: int = 6) -> pd.DataFrame:
     """Group-total Occ%/RevPAR for the trailing `months` (CY line) and their LY equivalents.
-    Reuses loading_stay_data/kpi_values — the current month's call hits the same cache key
+    Reuses load_nights/kpi_values — the current month's call hits the same cache key
     already warmed by the main KPI section above, so this only adds (months-1) new fetches."""
     rows = []
     for i in range(months - 1, -1, -1):
@@ -324,12 +354,8 @@ def _mer_trailing_trend(cy_start: date, months: int = 6) -> pd.DataFrame:
         m_dates = [m_start + timedelta(days=d) for d in range((m_end - m_start).days + 1)]
         ly_m_dates = [ly_m_start + timedelta(days=d) for d in range((ly_m_end - ly_m_start).days + 1)]
 
-        cy_sdf_i = expand_stay_dates(loading_stay_data(m_start, m_end))
-        ly_sdf_i = expand_stay_dates(loading_stay_data(ly_m_start, ly_m_end))
-        if not cy_sdf_i.empty:
-            cy_sdf_i = cy_sdf_i[(cy_sdf_i["stay_date"] >= m_start) & (cy_sdf_i["stay_date"] <= m_end)]
-        if not ly_sdf_i.empty:
-            ly_sdf_i = ly_sdf_i[(ly_sdf_i["stay_date"] >= ly_m_start) & (ly_sdf_i["stay_date"] <= ly_m_end)]
+        cy_sdf_i = load_nights(m_start, m_end)
+        ly_sdf_i = load_nights(ly_m_start, ly_m_end)
 
         cy_v = kpi_values(cy_sdf_i, m_dates, None)
         ly_v = kpi_values(ly_sdf_i, ly_m_dates, None)
@@ -703,6 +729,7 @@ def _mer_build_pdf(
         story.append(Spacer(1, 4 * mm))
 
     story.append(Paragraph("Headline KPIs", h2))
+    story.append(Paragraph(f"Date basis: {DATE_BASIS.lower()}.", note_style))
     cell_style = ParagraphStyle("MERCell", fontName="Helvetica", fontSize=7.5, leading=9)
     kpi_col_widths = [w * mm for w in (34, 11, 16, 12, 12, 14, 14, 14, 16, 27)]
     kpi_rows_wrapped = [
@@ -755,9 +782,10 @@ def _mer_build_pdf(
     story.append(Paragraph(f"Booking Source Mix — {ly_start:%B %Y} (LY)", h2))
     story.append(table(["Channel", "Bookings", "Room Nights", "Revenue", "ADR", "Rev %"],
                         source_table_rows(source_ly)))
-    story.append(Paragraph(
-        "Source mix is based on check-in date, unlike the stay-date-based KPIs above — "
-        "the two sections will not reconcile exactly for stays spanning month-end.", note_style))
+    if not CHECKIN_BASIS:
+        story.append(Paragraph(
+            "Source mix is based on check-in date, unlike the stay-date-based KPIs above — "
+            "the two sections will not reconcile exactly for stays spanning month-end.", note_style))
 
     lt_header = ["Metric", f"{cy_start:%b %Y}", f"{ly_start:%b %Y} (LY)"]
     def fmt_lt(v, pct=False):
@@ -1069,16 +1097,19 @@ with tabs[1]:
 (Weekday, Weekend, Sunday) and by property.
 
 **Metrics explained:**
-- **Room Nights Sold** — total number of room-nights occupied in the period (e.g. a 3-night stay = 3 room-nights)
-- **Revenue** — total gross revenue (inc. VAT) attributed to those nights, split evenly across each night of the stay
+- **Room Nights Sold** — total number of room-nights sold in the period (e.g. a 3-night stay = 3 room-nights)
+- **Revenue** — total gross revenue (inc. VAT) for those room-nights
 - **ADR (Average Daily Rate)** — Revenue ÷ Room Nights Sold. The average rate charged per occupied room per night
 - **Occupancy %** — Room Nights Sold ÷ Room Nights Available. Shows what percentage of available rooms were filled. 100% = fully booked every night
 - **RevPAR (Revenue per Available Room)** — Revenue ÷ Room Nights Available. The single most important hotel KPI — it captures both rate and occupancy together. ADR × Occupancy = RevPAR
 
-**Note on multi-night stays:** Eviivo's API only returns one total for the whole booking, not
-a night-by-night rate. So a 2-night stay billed at £150 + £160 shows here as an even £155/£155 —
-ADR and RevPAR on any given day can be slightly off if rates vary night-to-night within a stay.
-Totals across the full period are unaffected either way.
+**Date basis (sidebar):**
+- **Check-in date** (default) — a booking counts in full (all its nights and revenue) on the day the
+  guest arrives, so a 3-night stay arriving Friday adds 3 room-nights to Friday and the Weekend row.
+  Because nights after arrival are credited to the arrival day, occupancy for a short range can
+  go above 100%.
+- **Stay date** — each booking is spread across the nights the guest is in house. Eviivo's API only
+  returns one total per booking, so a 2-night stay billed at £150 + £160 shows as an even £155/£155.
 
 **Day type split:**
 - **Weekday (Mon–Thu)** — typically lower demand, more likely to include corporate/mid-week bookings
@@ -1095,237 +1126,229 @@ Totals across the full period are unaffected either way.
     with c2:
         wk_to   = st.date_input("To",   value=TODAY, key="wk_to")
 
-    df_wk = loading_stay_data(wk_from, wk_to)
+    st.caption(f"Date basis: **{DATE_BASIS}** (change in the sidebar).")
 
-    if df_wk.empty:
+    sdf = load_nights(wk_from, wk_to)
+
+    if sdf.empty:
         st.info("No confirmed bookings in this period.")
     else:
-        sdf = expand_stay_dates(df_wk)
-        if sdf.empty:
-            st.info("Could not expand stay dates (checkout dates may be missing from API).")
-        else:
-            sdf = sdf[(sdf["stay_date"] >= wk_from) & (sdf["stay_date"] <= wk_to)]
-            sdf["day_type"] = sdf["stay_date"].apply(day_type)
+        sdf = sdf.copy()
+        sdf["day_type"] = sdf["stay_date"].apply(day_type)
 
-            all_dates  = [wk_from + timedelta(days=i) for i in range((wk_to - wk_from).days + 1)]
+        all_dates  = [wk_from + timedelta(days=i) for i in range((wk_to - wk_from).days + 1)]
 
+        for prop in PROP_NAMES:
+            for note in room_block_notes(prop, all_dates):
+                st.info(f"**{prop}**: {note} — excluded from available room-nights below.")
+
+        def kpi_table(subset_df, dates_list):
+            results = []
             for prop in PROP_NAMES:
-                for note in room_block_notes(prop, all_dates):
-                    st.info(f"**{prop}**: {note} — excluded from available room-nights below.")
-
-            def kpi_table(subset_df, dates_list):
-                results = []
-                for prop in PROP_NAMES:
-                    v = kpi_values(subset_df, dates_list, prop)
-                    results.append({
-                        "Property":        prop,
-                        "Room Nights Sold": int(v["rns"]),
-                        "Revenue":         fmt_gbp(v["rev"]),
-                        "ADR":             fmt_gbp(v["adr"]),
-                        "Occupancy":       f"{v['occ']*100:.1f}%",
-                        "RevPAR":          fmt_gbp(v["revpar"]),
-                    })
-                # Group total
-                vt = kpi_values(subset_df, dates_list, None)
+                v = kpi_values(subset_df, dates_list, prop)
                 results.append({
-                    "Property":        "GROUP TOTAL",
-                    "Room Nights Sold": int(vt["rns"]),
-                    "Revenue":         fmt_gbp(vt["rev"]),
-                    "ADR":             fmt_gbp(vt["adr"]),
-                    "Occupancy":       f"{vt['occ']*100:.1f}%",
-                    "RevPAR":          fmt_gbp(vt["revpar"]),
+                    "Property":        prop,
+                    "Room Nights Sold": int(v["rns"]),
+                    "Revenue":         fmt_gbp(v["rev"]),
+                    "ADR":             fmt_gbp(v["adr"]),
+                    "Occupancy":       f"{v['occ']*100:.1f}%",
+                    "RevPAR":          fmt_gbp(v["revpar"]),
                 })
-                return pd.DataFrame(results)
+            # Group total
+            vt = kpi_values(subset_df, dates_list, None)
+            results.append({
+                "Property":        "GROUP TOTAL",
+                "Room Nights Sold": int(vt["rns"]),
+                "Revenue":         fmt_gbp(vt["rev"]),
+                "ADR":             fmt_gbp(vt["adr"]),
+                "Occupancy":       f"{vt['occ']*100:.1f}%",
+                "RevPAR":          fmt_gbp(vt["revpar"]),
+            })
+            return pd.DataFrame(results)
 
-            for dtype in ["Weekday (Mon–Thu)", "Weekend (Fri–Sat)", "Sunday"]:
-                sub  = sdf[sdf["day_type"] == dtype]
-                days = [d for d in all_dates if day_type(d) == dtype]
-                st.markdown(f"#### {dtype}")
-                if sub.empty or not days:
-                    st.caption("No stays in this segment for the selected period.")
-                else:
-                    st.dataframe(kpi_table(sub, days), hide_index=True, use_container_width=True)
+        for dtype in ["Weekday (Mon–Thu)", "Weekend (Fri–Sat)", "Sunday"]:
+            sub  = sdf[sdf["day_type"] == dtype]
+            days = [d for d in all_dates if day_type(d) == dtype]
+            st.markdown(f"#### {dtype}")
+            if sub.empty or not days:
+                st.caption("No stays in this segment for the selected period.")
+            else:
+                st.dataframe(kpi_table(sub, days), hide_index=True, use_container_width=True)
 
-            # ── Room nights vs same date range one week earlier ─────────────────
-            wk_from_lw = wk_from - timedelta(days=7)
-            wk_to_lw   = wk_to   - timedelta(days=7)
-            all_dates_lw = [wk_from_lw + timedelta(days=i) for i in range((wk_to_lw - wk_from_lw).days + 1)]
+        # ── Room nights vs same date range one week earlier ─────────────────
+        wk_from_lw = wk_from - timedelta(days=7)
+        wk_to_lw   = wk_to   - timedelta(days=7)
+        all_dates_lw = [wk_from_lw + timedelta(days=i) for i in range((wk_to_lw - wk_from_lw).days + 1)]
 
-            df_wk_lw = loading_stay_data(wk_from_lw, wk_to_lw)
-            sdf_lw = expand_stay_dates(df_wk_lw) if not df_wk_lw.empty else pd.DataFrame()
-            if not sdf_lw.empty:
-                sdf_lw = sdf_lw[(sdf_lw["stay_date"] >= wk_from_lw) & (sdf_lw["stay_date"] <= wk_to_lw)]
+        sdf_lw = load_nights(wk_from_lw, wk_to_lw)
 
-            def vs_lw(curr, prev, kind):
-                if kind == "gbp":
-                    fig = fmt_gbp(prev)
-                elif kind == "occ":
-                    fig = f"{prev * 100:.1f}%"
-                else:
-                    fig = f"{int(prev)}"
-                pc = fmt_pct((curr - prev) / prev * 100) if prev else "—"
-                return f"{fig} ({pc})"
+        def vs_lw(curr, prev, kind):
+            if kind == "gbp":
+                fig = fmt_gbp(prev)
+            elif kind == "occ":
+                fig = f"{prev * 100:.1f}%"
+            else:
+                fig = f"{int(prev)}"
+            pc = fmt_pct((curr - prev) / prev * 100) if prev else "—"
+            return f"{fig} ({pc})"
 
-            def combined_row(label, prop):
-                c = kpi_values(sdf, all_dates, prop)
-                p = kpi_values(sdf_lw, all_dates_lw, prop)
-                return {
-                    "Property":           label,
-                    "Room Nights Sold":   int(c["rns"]),
-                    "RNs vs LW":          vs_lw(c["rns"], p["rns"], "num"),
-                    "Revenue":            fmt_gbp(c["rev"]),
-                    "Revenue vs LW":      vs_lw(c["rev"], p["rev"], "gbp"),
-                    "ADR":                fmt_gbp(c["adr"]),
-                    "ADR vs LW":          vs_lw(c["adr"], p["adr"], "gbp"),
-                    "Occupancy":          f"{c['occ']*100:.1f}%",
-                    "Occupancy vs LW":    vs_lw(c["occ"], p["occ"], "occ"),
-                    "RevPAR":             fmt_gbp(c["revpar"]),
-                    "RevPAR vs LW":       vs_lw(c["revpar"], p["revpar"], "gbp"),
-                }
+        def combined_row(label, prop):
+            c = kpi_values(sdf, all_dates, prop)
+            p = kpi_values(sdf_lw, all_dates_lw, prop)
+            return {
+                "Property":           label,
+                "Room Nights Sold":   int(c["rns"]),
+                "RNs vs LW":          vs_lw(c["rns"], p["rns"], "num"),
+                "Revenue":            fmt_gbp(c["rev"]),
+                "Revenue vs LW":      vs_lw(c["rev"], p["rev"], "gbp"),
+                "ADR":                fmt_gbp(c["adr"]),
+                "ADR vs LW":          vs_lw(c["adr"], p["adr"], "gbp"),
+                "Occupancy":          f"{c['occ']*100:.1f}%",
+                "Occupancy vs LW":    vs_lw(c["occ"], p["occ"], "occ"),
+                "RevPAR":             fmt_gbp(c["revpar"]),
+                "RevPAR vs LW":       vs_lw(c["revpar"], p["revpar"], "gbp"),
+            }
 
-            combined = pd.DataFrame(
-                [combined_row(p, p) for p in PROP_NAMES] + [combined_row("GROUP TOTAL", None)]
-            )
+        combined = pd.DataFrame(
+            [combined_row(p, p) for p in PROP_NAMES] + [combined_row("GROUP TOTAL", None)]
+        )
 
-            def _lw_color(v):
-                if isinstance(v, str):
-                    if "(+" in v:
-                        return "color: #1a7f37; font-weight: 600"
-                    if "(-" in v:
-                        return "color: #c0392b; font-weight: 600"
-                return ""
+        def _lw_color(v):
+            if isinstance(v, str):
+                if "(+" in v:
+                    return "color: #1a7f37; font-weight: 600"
+                if "(-" in v:
+                    return "color: #c0392b; font-weight: 600"
+            return ""
 
-            st.markdown("#### All Days Combined")
-            st.dataframe(
-                combined.style.map(_lw_color, subset=[c for c in combined.columns if c.endswith("vs LW")]),
-                hide_index=True, use_container_width=True,
-            )
-            st.caption(
-                f"vs LW compares with the same dates one week earlier "
-                f"({wk_from_lw.strftime('%d %b')} – {wk_to_lw.strftime('%d %b %Y')}). "
-                "Each vs LW column shows last week's figure and the % change since. Green = up, red = down."
-            )
+        st.markdown("#### All Days Combined")
+        st.dataframe(
+            combined.style.map(_lw_color, subset=[c for c in combined.columns if c.endswith("vs LW")]),
+            hide_index=True, use_container_width=True,
+        )
+        st.caption(
+            f"vs LW compares with the same dates one week earlier "
+            f"({wk_from_lw.strftime('%d %b')} – {wk_to_lw.strftime('%d %b %Y')}). "
+            "Each vs LW column shows last week's figure and the % change since. Green = up, red = down."
+        )
 
-            # ── YoY comparison vs same period last year ─────────────────────────
-            wk_from_ly = wk_from - relativedelta(years=1)
-            wk_to_ly   = wk_to   - relativedelta(years=1)
-            all_dates_ly = [wk_from_ly + timedelta(days=i) for i in range((wk_to_ly - wk_from_ly).days + 1)]
+        # ── YoY comparison vs same period last year ─────────────────────────
+        wk_from_ly = wk_from - relativedelta(years=1)
+        wk_to_ly   = wk_to   - relativedelta(years=1)
+        all_dates_ly = [wk_from_ly + timedelta(days=i) for i in range((wk_to_ly - wk_from_ly).days + 1)]
 
-            df_wk_ly = loading_stay_data(wk_from_ly, wk_to_ly)
-            sdf_ly = expand_stay_dates(df_wk_ly) if not df_wk_ly.empty else pd.DataFrame()
-            if not sdf_ly.empty:
-                sdf_ly = sdf_ly[(sdf_ly["stay_date"] >= wk_from_ly) & (sdf_ly["stay_date"] <= wk_to_ly)]
+        sdf_ly = load_nights(wk_from_ly, wk_to_ly)
 
-            st.markdown(
-                f"#### vs Same Period Last Year "
-                f"({wk_from_ly.strftime('%d %b %Y')} – {wk_to_ly.strftime('%d %b %Y')})"
-            )
+        st.markdown(
+            f"#### vs Same Period Last Year "
+            f"({wk_from_ly.strftime('%d %b %Y')} – {wk_to_ly.strftime('%d %b %Y')})"
+        )
 
-            def pct_change(curr, prev):
-                if not prev:
-                    return None
-                return (curr - prev) / prev * 100
+        def pct_change(curr, prev):
+            if not prev:
+                return None
+            return (curr - prev) / prev * 100
 
-            def yoy_row(label, curr, prev, not_open_ly, capacity_changed=False):
-                if not_open_ly:
-                    return {"Property": label, "Room Nights Sold": "Not open (LY)",
-                            "Revenue": "Not open (LY)", "ADR": "Not open (LY)",
-                            "Occupancy": "Not open (LY)", "RevPAR": "Not open (LY)"}
-                display_label = f"{label} *" if capacity_changed else label
-                row = {"Property": display_label}
-                for key, col in [("rns", "Room Nights Sold"), ("rev", "Revenue"),
-                                  ("adr", "ADR"), ("occ", "Occupancy"), ("revpar", "RevPAR")]:
-                    pc = pct_change(curr[key], prev[key])
-                    row[col] = fmt_pct(pc) if pc is not None else "—"
-                return row
+        def yoy_row(label, curr, prev, not_open_ly, capacity_changed=False):
+            if not_open_ly:
+                return {"Property": label, "Room Nights Sold": "Not open (LY)",
+                        "Revenue": "Not open (LY)", "ADR": "Not open (LY)",
+                        "Occupancy": "Not open (LY)", "RevPAR": "Not open (LY)"}
+            display_label = f"{label} *" if capacity_changed else label
+            row = {"Property": display_label}
+            for key, col in [("rns", "Room Nights Sold"), ("rev", "Revenue"),
+                              ("adr", "ADR"), ("occ", "Occupancy"), ("revpar", "RevPAR")]:
+                pc = pct_change(curr[key], prev[key])
+                row[col] = fmt_pct(pc) if pc is not None else "—"
+            return row
 
-            yoy_rows = []
-            avail_curr_total, avail_prev_total = 0, 0
-            for prop in PROP_NAMES:
-                opening = OPENING_DATES.get(prop)
-                not_open_ly = bool(opening) and all(d < opening for d in all_dates_ly)
-                curr_v = kpi_values(sdf, all_dates, prop)
-                prev_v = kpi_values(sdf_ly, all_dates_ly, prop)
-                avail_curr = avail_nights_in_range(prop, all_dates)
-                avail_prev = avail_nights_in_range(prop, all_dates_ly)
-                avail_curr_total += avail_curr
-                avail_prev_total += avail_prev
-                capacity_changed = (not not_open_ly) and avail_curr != avail_prev
-                yoy_rows.append(yoy_row(prop, curr_v, prev_v, not_open_ly, capacity_changed))
+        yoy_rows = []
+        avail_curr_total, avail_prev_total = 0, 0
+        for prop in PROP_NAMES:
+            opening = OPENING_DATES.get(prop)
+            not_open_ly = bool(opening) and all(d < opening for d in all_dates_ly)
+            curr_v = kpi_values(sdf, all_dates, prop)
+            prev_v = kpi_values(sdf_ly, all_dates_ly, prop)
+            avail_curr = avail_nights_in_range(prop, all_dates)
+            avail_prev = avail_nights_in_range(prop, all_dates_ly)
+            avail_curr_total += avail_curr
+            avail_prev_total += avail_prev
+            capacity_changed = (not not_open_ly) and avail_curr != avail_prev
+            yoy_rows.append(yoy_row(prop, curr_v, prev_v, not_open_ly, capacity_changed))
 
-            curr_t = kpi_values(sdf, all_dates, None)
-            prev_t = kpi_values(sdf_ly, all_dates_ly, None)
-            yoy_rows.append(yoy_row("GROUP TOTAL", curr_t, prev_t, False,
-                                     avail_curr_total != avail_prev_total))
+        curr_t = kpi_values(sdf, all_dates, None)
+        prev_t = kpi_values(sdf_ly, all_dates_ly, None)
+        yoy_rows.append(yoy_row("GROUP TOTAL", curr_t, prev_t, False,
+                                 avail_curr_total != avail_prev_total))
 
-            yoy_df = pd.DataFrame(yoy_rows)
+        yoy_df = pd.DataFrame(yoy_rows)
 
-            def _yoy_color(v):
-                if isinstance(v, str):
-                    if v.startswith("+"):
-                        return "color: #1a7f37; font-weight: 600"
-                    if v.startswith("-"):
-                        return "color: #c0392b; font-weight: 600"
-                return ""
+        def _yoy_color(v):
+            if isinstance(v, str):
+                if v.startswith("+"):
+                    return "color: #1a7f37; font-weight: 600"
+                if v.startswith("-"):
+                    return "color: #c0392b; font-weight: 600"
+            return ""
 
-            yoy_styled = yoy_df.style.map(_yoy_color, subset=[c for c in yoy_df.columns if c != "Property"])
-            st.dataframe(yoy_styled, hide_index=True, use_container_width=True)
-            st.caption(
-                "Green = up vs same period last year, red = down. 'Not open (LY)' = "
-                "property wasn't trading in the comparison period. * = room count changed "
-                "between the two periods (e.g. The Queen's Head expanded from 4 to 9 rooms "
-                "on 1 Apr 2026) — Room Nights Sold and Revenue % aren't like-for-like for "
-                "these rows; Occupancy and RevPAR are capacity-adjusted and remain comparable."
-            )
+        yoy_styled = yoy_df.style.map(_yoy_color, subset=[c for c in yoy_df.columns if c != "Property"])
+        st.dataframe(yoy_styled, hide_index=True, use_container_width=True)
+        st.caption(
+            "Green = up vs same period last year, red = down. 'Not open (LY)' = "
+            "property wasn't trading in the comparison period. * = room count changed "
+            "between the two periods (e.g. The Queen's Head expanded from 4 to 9 rooms "
+            "on 1 Apr 2026) — Room Nights Sold and Revenue % aren't like-for-like for "
+            "these rows; Occupancy and RevPAR are capacity-adjusted and remain comparable."
+        )
 
-            # ── Charts ────────────────────────────────────────────────────────
-            import plotly.graph_objects as go
-            st.divider()
-            st.markdown("#### Charts")
+        # ── Charts ────────────────────────────────────────────────────────
+        import plotly.graph_objects as go
+        st.divider()
+        st.markdown("#### Charts")
 
-            rev_by_prop, occ_by_prop, revpar_by_prop = [], [], []
-            for prop in PROP_NAMES:
-                pdf   = sdf[sdf["venue_name"] == prop]
-                avail = avail_nights_in_range(prop, all_dates)
-                rns   = pdf["num_rooms"].sum()
-                rev   = pdf["nightly_revenue"].sum()
-                rev_by_prop.append(float(rev))
-                occ_by_prop.append(rns / avail * 100 if avail else 0)
-                revpar_by_prop.append(rev / avail if avail else 0)
+        rev_by_prop, occ_by_prop, revpar_by_prop = [], [], []
+        for prop in PROP_NAMES:
+            pdf   = sdf[sdf["venue_name"] == prop]
+            avail = avail_nights_in_range(prop, all_dates)
+            rns   = pdf["num_rooms"].sum()
+            rev   = pdf["nightly_revenue"].sum()
+            rev_by_prop.append(float(rev))
+            occ_by_prop.append(rns / avail * 100 if avail else 0)
+            revpar_by_prop.append(rev / avail if avail else 0)
 
-            short_props = [p.replace("The ", "") for p in PROP_NAMES]
+        short_props = [p.replace("The ", "") for p in PROP_NAMES]
 
-            fig_wk_rev = go.Figure([
-                go.Bar(x=short_props, y=rev_by_prop, marker_color=BRAND_GREEN)
-            ])
-            fig_wk_rev.update_layout(
-                title="Revenue by Property",
-                yaxis_title="Revenue (£)", yaxis_tickprefix="£", yaxis_tickformat=",.0f",
-                margin=dict(t=50, b=20), height=320, showlegend=False,
-            )
+        fig_wk_rev = go.Figure([
+            go.Bar(x=short_props, y=rev_by_prop, marker_color=BRAND_GREEN)
+        ])
+        fig_wk_rev.update_layout(
+            title="Revenue by Property",
+            yaxis_title="Revenue (£)", yaxis_tickprefix="£", yaxis_tickformat=",.0f",
+            margin=dict(t=50, b=20), height=320, showlegend=False,
+        )
 
-            fig_wk_occ = go.Figure([
-                go.Bar(x=short_props, y=occ_by_prop, marker_color=BRAND_LIGHT)
-            ])
-            fig_wk_occ.update_layout(
-                title="Occupancy % by Property",
-                yaxis_title="Occupancy %", yaxis_ticksuffix="%",
-                margin=dict(t=50, b=20), height=320, showlegend=False,
-            )
+        fig_wk_occ = go.Figure([
+            go.Bar(x=short_props, y=occ_by_prop, marker_color=BRAND_LIGHT)
+        ])
+        fig_wk_occ.update_layout(
+            title="Occupancy % by Property",
+            yaxis_title="Occupancy %", yaxis_ticksuffix="%",
+            margin=dict(t=50, b=20), height=320, showlegend=False,
+        )
 
-            fig_wk_rp = go.Figure([
-                go.Bar(x=short_props, y=revpar_by_prop, marker_color=BRAND_GREEN)
-            ])
-            fig_wk_rp.update_layout(
-                title="RevPAR by Property",
-                yaxis_title="RevPAR (£)", yaxis_tickprefix="£", yaxis_tickformat=",.0f",
-                margin=dict(t=50, b=20), height=320, showlegend=False,
-            )
+        fig_wk_rp = go.Figure([
+            go.Bar(x=short_props, y=revpar_by_prop, marker_color=BRAND_GREEN)
+        ])
+        fig_wk_rp.update_layout(
+            title="RevPAR by Property",
+            yaxis_title="RevPAR (£)", yaxis_tickprefix="£", yaxis_tickformat=",.0f",
+            margin=dict(t=50, b=20), height=320, showlegend=False,
+        )
 
-            c1, c2 = st.columns(2)
-            c1.plotly_chart(fig_wk_rev, use_container_width=True)
-            c2.plotly_chart(fig_wk_occ, use_container_width=True)
-            st.plotly_chart(fig_wk_rp, use_container_width=True)
+        c1, c2 = st.columns(2)
+        c1.plotly_chart(fig_wk_rev, use_container_width=True)
+        c2.plotly_chart(fig_wk_occ, use_container_width=True)
+        st.plotly_chart(fig_wk_rp, use_container_width=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2092,21 +2115,28 @@ with tabs[6]:
     st.subheader("Pick-up Report")
     with st.expander("ℹ️ How to read this report", expanded=False):
         st.markdown("""
-**What it shows:** For each date in the next 3 months, confirmed rooms in-house that night,
-key revenue metrics, average length of stay, and how many rooms were recently picked up.
+**What it shows:** For each date in the next 3 months, confirmed room-nights on the books,
+key revenue metrics, average length of stay, and how many were recently picked up.
+
+**Date basis (sidebar):**
+- **Check-in date** (default) — each date shows bookings *arriving* that day, counted in full:
+  all their room-nights and revenue. A 2-night stay for 1 room adds 2 RNs to its arrival date,
+  so Occ% on a single date can go above 100%.
+- **Stay date** — each date shows rooms *in house* that night, with revenue split evenly
+  across the nights of each stay.
 
 **Columns explained:**
 - **Avail** — total rooms available on that date
-- **RNs OTB** — confirmed rooms in-house that night (guests already booked for that stay date)
+- **RNs OTB** — confirmed room-nights on the books for that date
 - **Occ%** — RNs OTB ÷ Avail
 - **ADR** — average nightly rate of bookings in-house (revenue ÷ rooms, nightly share only — see note below)
 - **RevPAR** — nightly revenue ÷ available rooms
-- **Avg LOS** — average length of stay of bookings that include this night
-- **+1D / +3D / +7D** — rooms added to the books in the last 1, 3 or 7 days for that stay date
+- **Avg LOS** — average length of stay of bookings counted on this date
+- **+1D / +3D / +7D** — room-nights added to the books in the last 1, 3 or 7 days for that date
 
-**Note:** Eviivo only returns one total per booking, not a per-night rate, so multi-night stays
-are split evenly across their nights here. A given night's ADR can be slightly off if the real
-nightly rate varied within that stay; period totals aren't affected.
+**Note (stay date basis):** Eviivo only returns one total per booking, not a per-night rate, so
+multi-night stays are split evenly across their nights. A given night's ADR can be slightly off
+if the real nightly rate varied within that stay; period totals aren't affected.
 
 **Rate & Restriction Log:** Record rate changes, min LOS updates, promotions, and stop-sells
 below. They appear as markers on the charts so you can see whether pick-up responded.
@@ -2116,7 +2146,25 @@ below. They appear as markers on the charts so you can see whether pick-up respo
     pu_start = date(TODAY.year, TODAY.month, 1)
     pu_end   = (pu_start + relativedelta(months=3)) - timedelta(days=1)
 
-    df_pu = loading_stay_data(pu_start, pu_end)
+    df_pu = loading_data(pu_start, pu_end) if CHECKIN_BASIS else loading_stay_data(pu_start, pu_end)
+    st.caption(f"Date basis: **{DATE_BASIS}** (change in the sidebar).")
+
+    def _pu_day(df, prop, d):
+        """Bookings counted against date d, with the room-nights (`rn`) and revenue (`rev_share`)
+        each contributes: the whole booking on its arrival day (check-in basis), or one night's
+        share for every night in house (stay basis)."""
+        if df.empty:
+            return pd.DataFrame()
+        p = df[df["venue_name"] == prop]
+        if CHECKIN_BASIS:
+            p = p[p["checkin"] == d].copy()
+            p["rn"] = p["num_rooms"] * p["nights"]
+            p["rev_share"] = p["revenue"]
+        else:
+            p = p[(p["checkin"] <= d) & (p["checkout"] > d)].copy()
+            p["rn"] = p["num_rooms"]
+            p["rev_share"] = p["revenue"] / p["nights"].replace(0, 1)
+        return p
 
     YESTERDAY     = TODAY - timedelta(days=1)
     ref_1d        = TODAY                                                      # today only
@@ -2141,19 +2189,16 @@ below. They appear as markers on the charts so you can see whether pick-up respo
             rns = rev = pu1 = pu_yest = pu3 = pu7 = pu_lwk = pu_lmth = los_nights = los_count = 0
             avail_total = 0
             for prop in props_list:
-                p = df[
-                    (df["venue_name"] == prop) &
-                    (df["checkin"] <= d) & (df["checkout"] > d)
-                ] if not df.empty else pd.DataFrame()
+                p = _pu_day(df, prop, d)
                 if not p.empty:
-                    rns        += int(p["num_rooms"].sum())
-                    rev        += (p["revenue"] / p["nights"].replace(0, 1)).sum()
-                    pu1        += int(p[p["created"] == ref_1d]["num_rooms"].sum())
-                    pu_yest    += int(p[p["created"] == YESTERDAY]["num_rooms"].sum())
-                    pu3        += int(p[p["created"] >= ref_3d]["num_rooms"].sum())
-                    pu7        += int(p[p["created"] >= ref_7d]["num_rooms"].sum())
-                    pu_lwk     += int(p[(p["created"] >= last_wk_start) & (p["created"] <= last_wk_end)]["num_rooms"].sum())
-                    pu_lmth    += int(p[(p["created"] >= last_mth_start) & (p["created"] <= last_mth_end)]["num_rooms"].sum())
+                    rns        += int(p["rn"].sum())
+                    rev        += p["rev_share"].sum()
+                    pu1        += int(p[p["created"] == ref_1d]["rn"].sum())
+                    pu_yest    += int(p[p["created"] == YESTERDAY]["rn"].sum())
+                    pu3        += int(p[p["created"] >= ref_3d]["rn"].sum())
+                    pu7        += int(p[p["created"] >= ref_7d]["rn"].sum())
+                    pu_lwk     += int(p[(p["created"] >= last_wk_start) & (p["created"] <= last_wk_end)]["rn"].sum())
+                    pu_lmth    += int(p[(p["created"] >= last_mth_start) & (p["created"] <= last_mth_end)]["rn"].sum())
                     los_nights += p["nights"].sum()
                     los_count  += len(p)
                 avail_total += get_room_count(prop, d)
@@ -2265,14 +2310,11 @@ below. They appear as markers on the charts so you can see whether pick-up respo
         rns = pu7 = avail_total = 0
         rev_tot = los_nights = los_count = 0
         for prop in PROP_NAMES:
-            p = df_pu[
-                (df_pu["venue_name"] == prop) &
-                (df_pu["checkin"] <= d) & (df_pu["checkout"] > d)
-            ] if not df_pu.empty else pd.DataFrame()
+            p = _pu_day(df_pu, prop, d)
             if not p.empty:
-                rns        += int(p["num_rooms"].sum())
-                pu7        += int(p[p["created"] >= ref_7d]["num_rooms"].sum())  # last 7 days incl. today
-                rev_tot    += (p["revenue"] / p["nights"].replace(0, 1)).sum()
+                rns        += int(p["rn"].sum())
+                pu7        += int(p[p["created"] >= ref_7d]["rn"].sum())  # last 7 days incl. today
+                rev_tot    += p["rev_share"].sum()
                 los_nights += p["nights"].sum()
                 los_count  += len(p)
             avail_total += get_room_count(prop, d)
@@ -2332,7 +2374,7 @@ below. They appear as markers on the charts so you can see whether pick-up respo
     ])
     _add_rate_events(fig_pu7)
     fig_pu7.update_layout(
-        title="Rooms Picked Up — Last 7 Days by Stay Date",
+        title=f"Room-Nights Picked Up — Last 7 Days by {DATE_BASIS}",
         yaxis_title="Room Nights",
         xaxis_tickangle=-45,
         margin=dict(t=80, b=60), height=360,
@@ -2344,7 +2386,7 @@ below. They appear as markers on the charts so you can see whether pick-up respo
     ])
     _add_rate_events(fig_adr)
     fig_adr.update_layout(
-        title="ADR — On The Books by Stay Date",
+        title=f"ADR — On The Books by {DATE_BASIS}",
         yaxis_title="ADR (£)", yaxis_tickprefix="£", yaxis_tickformat=",.0f",
         xaxis_tickangle=-45,
         margin=dict(t=80, b=60), height=320,
@@ -2356,7 +2398,7 @@ below. They appear as markers on the charts so you can see whether pick-up respo
     ])
     _add_rate_events(fig_los)
     fig_los.update_layout(
-        title="Average Length of Stay — On The Books by Stay Date",
+        title=f"Average Length of Stay — On The Books by {DATE_BASIS}",
         yaxis_title="Nights",
         xaxis_tickangle=-45,
         margin=dict(t=80, b=60), height=320,
@@ -2741,19 +2783,19 @@ with tabs[9]:
 booking source mix, booking lead time, cancellations, and blocked rooms — each compared
 against the same month last year.
 
-**Occupancy/RevPAR/ADR** are calculated on a **stay-date** basis (same method as the
-Weekly/MTD tab), so a booking spanning month-end only counts the nights that actually
-fall in the selected month. **Source mix and lead time** are calculated on a **check-in
-date** basis (same as the Source Report and Pace Report tabs) — the two sections won't
-reconcile to the same totals for stays spanning a month boundary; that's expected.
+**Occupancy/RevPAR/ADR** follow the **date basis** chosen in the sidebar (same as the
+Weekly/MTD tab). On **check-in date** (default), a booking counts in full in the month the
+guest arrives, matching the source mix and lead time sections below. On **stay date**, a
+booking spanning month-end only counts the nights that fall in the selected month, so it
+won't reconcile exactly with source mix and lead time (which are always check-in based).
 
 **Properties not yet open** in the current or prior-year month (e.g. Fleur de Lys before
 Sep 2025) show "N/A" for that side and are excluded from the like-for-like group total,
 but included in the full group total.
 
-**Note on ADR:** Eviivo's API only gives one total per booking, not a per-night rate, so
-multi-night stays are split evenly across their nights. Day-level ADR can be slightly off if
-the real rate varied within a stay; monthly totals aren't affected.
+**Note on ADR (stay date basis):** Eviivo's API only gives one total per booking, not a
+per-night rate, so multi-night stays are split evenly across their nights. Day-level ADR can be
+slightly off if the real rate varied within a stay; monthly totals aren't affected.
 
 **Cancellations** reflect bookings currently marked cancelled as of today — Eviivo
 doesn't expose a cancellation date, so this can't show cancellations that happened
@@ -2785,13 +2827,9 @@ than showing a misleading zero.
     cy_dates = [cy_start + timedelta(days=i) for i in range((cy_end - cy_start).days + 1)]
     ly_dates = [ly_start + timedelta(days=i) for i in range((ly_end - ly_start).days + 1)]
 
-    # ── Fetch: stay-date basis (occupancy / RevPAR / ADR) ───────────────────────
-    cy_sdf = expand_stay_dates(loading_stay_data(cy_start, cy_end))
-    ly_sdf = expand_stay_dates(loading_stay_data(ly_start, ly_end))
-    if not cy_sdf.empty:
-        cy_sdf = cy_sdf[(cy_sdf["stay_date"] >= cy_start) & (cy_sdf["stay_date"] <= cy_end)]
-    if not ly_sdf.empty:
-        ly_sdf = ly_sdf[(ly_sdf["stay_date"] >= ly_start) & (ly_sdf["stay_date"] <= ly_end)]
+    # ── Fetch: sidebar date basis (occupancy / RevPAR / ADR) ────────────────────
+    cy_sdf = load_nights(cy_start, cy_end)
+    ly_sdf = load_nights(ly_start, ly_end)
 
     # ── Fetch: check-in date basis (source mix / lead time) ─────────────────────
     df_cy_ci = loading_data(cy_start, cy_end)
@@ -2840,6 +2878,7 @@ than showing a misleading zero.
             st.success("Notes saved.")
 
     st.markdown("#### Headline KPIs")
+    st.caption(f"Date basis: **{DATE_BASIS}** (change in the sidebar).")
     kpi_disp = pd.DataFrame(
         kpi_pdf_rows,
         columns=["Property", "RNs", "Revenue", "ADR", "Occ %", "RevPAR", "YoY Rev %", "YoY Occ", "Signal", "Note"],
@@ -2952,10 +2991,11 @@ than showing a misleading zero.
         except Exception:
             pass
 
-    st.caption(
-        "Source mix is based on check-in date, unlike the stay-date-based KPIs above — "
-        "the two sections will not reconcile exactly for stays spanning month-end."
-    )
+    if not CHECKIN_BASIS:
+        st.caption(
+            "Source mix is based on check-in date, unlike the stay-date-based KPIs above — "
+            "the two sections will not reconcile exactly for stays spanning month-end."
+        )
 
     st.divider()
 

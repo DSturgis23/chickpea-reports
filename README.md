@@ -26,7 +26,7 @@ Gross accommodation revenue (inc. VAT) by property and month, with year-on-year 
 
 ### 2. Weekly / MTD Performance
 ADR, occupancy, and RevPAR for a chosen date range, split by day type (Weekday / Weekend / Sunday).
-Revenue is allocated proportionally across each night of a stay rather than attributed entirely to check-in date.
+Follows the sidebar **Date basis** switch (see below).
 
 ### 3. Source Report
 Booking channel breakdown (Booking.com, Expedia, Agoda, direct, corporate travel, etc.) for a chosen date range.
@@ -60,6 +60,7 @@ Forward booking pace vs same point last year — by month, for the group and eac
 
 ### 7. Pick-up Report
 Current occupancy on the books vs last year for each date in the next two months.
+Follows the sidebar **Date basis** switch: arrivals per date (check-in) or rooms in house per night (stay).
 Modelled on Lighthouse report format. Shows today's position only — daily snapshot storage would be
 needed to show pick-up vs 7/14/28 days ago (future enhancement).
 
@@ -76,10 +77,16 @@ name (Eviivo issues a fresh guest ID per booking so it can't be used to spot rep
 
 ### 10. Month-End Report
 Single-month headline KPIs (revenue, RevPAR, ADR, occupancy), source mix, lead time,
-cancellations, and blocked rooms, each vs the same month last year. Occupancy/RevPAR/ADR are
-stay-date based; source mix/lead time are check-in-date based, so the two sections won't
-reconcile for stays spanning a month boundary — that's expected. Exportable as a PDF via the
+cancellations, and blocked rooms, each vs the same month last year. Occupancy/RevPAR/ADR follow
+the sidebar **Date basis** switch; source mix/lead time are always check-in-date based, so on stay
+date the two sections won't reconcile for stays spanning a month boundary — that's expected. Exportable as a PDF via the
 download button at the bottom of the tab.
+
+### Date basis
+The sidebar switch sets how Weekly / MTD, Pick-up and Month-End credit a booking:
+- **Check-in date** (default) — all of a booking's room-nights and revenue count on its arrival date.
+  Occupancy for a single day or short range can exceed 100%.
+- **Stay date** — revenue is split evenly across each night in house.
 
 ---
 
